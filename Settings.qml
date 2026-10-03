@@ -6,7 +6,7 @@ SettingsObject {
     property bool enabled: false
     property int sensitivity: 55
     property int confidence: 72
-    property string accelPolicy: "required"
+    property string accelPolicy: "preferred"
     property int cooldownMs: 700
     property int multiTapWindowMs: 420
     property int calibrationCount: 12

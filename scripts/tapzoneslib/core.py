@@ -60,7 +60,7 @@ def atomic_json(path, value):
     tmp=path.with_suffix(path.suffix+".tmp"); tmp.write_text(json.dumps(value,sort_keys=True,indent=2)+"\n"); os.replace(tmp,path)
 def plugin_settings():
     p=pathlib.Path(os.environ.get("XDG_CONFIG_HOME",os.path.expanduser("~/.config")))/"caelestia/plugins.json"; x=read_json(p,{}).get("settings",{}).get("dcqwqc/tapzones",{}); return x if isinstance(x,dict) else {}
-def defaults(): return {"enabled":False,"sensitivity":55,"confidence":72,"accelPolicy":"required","cooldownMs":700,"multiTapWindowMs":420,"calibrationCount":12,"actionsJson":json.dumps(DEFAULT_ACTIONS)}
+def defaults(): return {"enabled":False,"sensitivity":55,"confidence":72,"accelPolicy":"preferred","cooldownMs":700,"multiTapWindowMs":420,"calibrationCount":12,"actionsJson":json.dumps(DEFAULT_ACTIONS)}
 def effective_config():
     c=defaults(); c.update(plugin_settings()); c.update(read_json(xdg("config","config.json"),{})); return c
 def discover_accel():
