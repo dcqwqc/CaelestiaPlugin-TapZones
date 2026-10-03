@@ -1,15 +1,18 @@
 import argparse,json
-from .core import DEFAULT_CALIBRATION_SAMPLES,ZONES,discover_accel,load_classifier,read_json,run_action,xdg,atomic_json
+from .core import DEFAULT_CALIBRATION_SAMPLES,ZONES,discover_accel,load_classifier,load_enhanced_classifier,read_json,run_action,xdg,atomic_json
 from .daemon import run
 
 
 def inactive_status():
- c=load_classifier()
- return {"running":False,"audio":"unavailable","accel":str(discover_accel() or "unavailable"),"calibration":None,"lastEvent":None,"lastAction":None,"profile":c.profile(),"profileReady":c.profile_ready(),"calibrationQuality":c.validation_accuracy(),"triggerSource":"unavailable","degraded":True,"testActive":False,"testEvent":None,"fingerprintVersion":2}
+ c=load_classifier(); e=load_enhanced_classifier()
+ cq=c.validation_accuracy(); eq=e.validation_accuracy()
+ ca=float((cq or {}).get("accuracy",0) or 0); ea=float((eq or {}).get("accuracy",0) or 0)
+ use_v3=e.profile_ready() and ea>=max(.90,ca if c.profile_ready() else 0)
+ return {"running":False,"audio":"unavailable","accel":str(discover_accel() or "unavailable"),"calibration":None,"lastEvent":None,"lastAction":None,"profile":c.profile(),"profileReady":c.profile_ready(),"calibrationQuality":cq,"enhancedProfile":e.profile(),"enhancedProfileReady":e.profile_ready(),"enhancedQuality":eq,"triggerSource":"unavailable","degraded":True,"testActive":False,"testEvent":None,"fingerprintVersion":3 if use_v3 else 2,"activeModel":"v3-dispersion" if use_v3 else "v2-axis"}
 
 
 def main():
- p=argparse.ArgumentParser();s=p.add_subparsers(dest="cmd",required=True);s.add_parser("daemon");s.add_parser("status");c=s.add_parser("calibrate");c.add_argument("zone",choices=ZONES);c.add_argument("--count",type=int,default=DEFAULT_CALIBRATION_SAMPLES);s.add_parser("reset");a=s.add_parser("action-test");a.add_argument("action");a.add_argument("--custom-json",default="[]");s.add_parser("test-start");s.add_parser("test-stop");s.add_parser("accel-discover");args=p.parse_args()
+ p=argparse.ArgumentParser();s=p.add_subparsers(dest="cmd",required=True);s.add_parser("daemon");s.add_parser("status");c=s.add_parser("calibrate");c.add_argument("zone",choices=ZONES);c.add_argument("--count",type=int,default=DEFAULT_CALIBRATION_SAMPLES);s.add_parser("reset");s.add_parser("calibrate-enhanced");s.add_parser("reset-enhanced");a=s.add_parser("action-test");a.add_argument("action");a.add_argument("--custom-json",default="[]");s.add_parser("test-start");s.add_parser("test-stop");s.add_parser("accel-discover");args=p.parse_args()
  if args.cmd=="daemon":run();return 0
  if args.cmd=="status":
   status=inactive_status();status.update(read_json(xdg("runtime","status.json"),{}));print(json.dumps(status));return 0

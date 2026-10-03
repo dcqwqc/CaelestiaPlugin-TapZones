@@ -11,6 +11,9 @@ from .core import (
     AudioTapDetector,
     CLASSIFIER_MIN_SAMPLES,
     DEFAULT_CALIBRATION_SAMPLES,
+    ENHANCED_MAX_SAMPLES,
+    ENHANCED_MIN_SAMPLES,
+    ENHANCED_TARGET_SAMPLES,
     accel_sample,
     audio_features,
     tap_gate_features,
@@ -18,9 +21,13 @@ from .core import (
     discover_accel,
     effective_config,
     load_classifier,
+    load_enhanced_classifier,
     location_signature,
+    enhanced_location_signature,
+    capture_quality,
     run_action,
     save_classifier,
+    save_enhanced_classifier,
     xdg,
 )
 
@@ -29,6 +36,7 @@ class Daemon:
     def __init__(self):
         self.accel_device = discover_accel()
         self.classifier = load_classifier()
+        self.enhanced_classifier = load_enhanced_classifier()
         self.q = queue.Queue(maxsize=16)
         self.prev_accel = None
         self.next_accel_discovery = 0.0
@@ -62,6 +70,11 @@ class Daemon:
             "profileReady": self.classifier.profile_ready(),
             "calibrationQuality": self.classifier.validation_accuracy(),
             "axisModel": self.classifier.axis_model_info(),
+            "enhancedProfile": self.enhanced_classifier.profile(),
+            "enhancedProfileReady": self.enhanced_classifier.profile_ready(),
+            "enhancedQuality": self.enhanced_classifier.validation_accuracy(),
+            "enhancedAxisModel": self.enhanced_classifier.axis_model_info(),
+            "activeModel": "v2-axis",
             "triggerSource": "unknown",
             "degraded": False,
             "testActive": False,
@@ -74,7 +87,9 @@ class Daemon:
             "detectorReady": False,
             "capturingFingerprint": False,
             "fingerprintVersion": 2,
+            "lastCalibrationReject": None,
         }
+        self._refresh_active_model()
 
     def publish(self):
         atomic_json(xdg("runtime", "status.json"), self.status)
@@ -85,6 +100,106 @@ class Daemon:
         if recompute_quality:
             self.status["calibrationQuality"] = self.classifier.validation_accuracy()
             self.status["axisModel"] = self.classifier.axis_model_info()
+
+    def refresh_enhanced_status(self):
+        self.status["enhancedProfile"] = self.enhanced_classifier.profile()
+        self.status["enhancedProfileReady"] = self.enhanced_classifier.profile_ready()
+        self.status["enhancedQuality"] = self.enhanced_classifier.validation_accuracy()
+        self.status["enhancedAxisModel"] = self.enhanced_classifier.axis_model_info()
+        self._refresh_active_model()
+
+    def _refresh_active_model(self):
+        legacy_quality = self.status.get("calibrationQuality") or {}
+        enhanced_quality = self.status.get("enhancedQuality") or {}
+        legacy_accuracy = float(legacy_quality.get("accuracy", 0.0) or 0.0)
+        enhanced_accuracy = float(enhanced_quality.get("accuracy", 0.0) or 0.0)
+        enhanced_ready = bool(self.status.get("enhancedProfileReady"))
+        legacy_ready = bool(self.status.get("profileReady"))
+        required = max(0.90, legacy_accuracy if legacy_ready else 0.0)
+        use_enhanced = enhanced_ready and enhanced_accuracy >= required
+        self.status["activeModel"] = "v3-dispersion" if use_enhanced else "v2-axis"
+        self.status["fingerprintVersion"] = 3 if use_enhanced else 2
+
+    def active_classifier(self):
+        if self.status.get("activeModel") == "v3-dispersion":
+            return self.enhanced_classifier
+        return self.classifier
+
+    def active_profile_ready(self):
+        return self.active_classifier().profile_ready()
+
+    @staticmethod
+    def _enhanced_sequence(rounds=ENHANCED_MAX_SAMPLES):
+        patterns = (
+            ("TL", "BR", "TR", "BL"),
+            ("TR", "BL", "BR", "TL"),
+            ("BL", "TR", "TL", "BR"),
+            ("BR", "TL", "BL", "TR"),
+        )
+        sequence = []
+        for index in range(rounds):
+            sequence.extend(patterns[index % len(patterns)])
+        return sequence
+
+    def _start_enhanced_calibration(self, now):
+        self.enhanced_classifier.samples = {}
+        self.enhanced_classifier._axis_cache = None
+        save_enhanced_classifier(self.enhanced_classifier)
+        self.refresh_enhanced_status()
+        self.drain_audio()
+        self.audio_detector.reset(require_quiet=True)
+        self.calibration_armed_at = now + 0.35
+        sequence = self._enhanced_sequence()
+        self.status["lastCalibrationReject"] = None
+        self.status["calibration"] = {
+            "mode": "enhanced-auto",
+            "zone": sequence[0],
+            "sequence": sequence,
+            "step": 0,
+            "minimumTotal": ENHANCED_TARGET_SAMPLES * 4,
+            "maxTotal": ENHANCED_MAX_SAMPLES * 4,
+            "counts": {zone: 0 for zone in ("TL","TR","BL","BR")},
+            "rejected": 0,
+            "armed": False,
+            "complete": False,
+        }
+        self.status["testActive"] = False
+        self.status["testEvent"] = None
+        self.pending = []
+
+    def _advance_enhanced_calibration(self):
+        calibration = self.status.get("calibration")
+        if not calibration or calibration.get("mode") != "enhanced-auto":
+            return
+        calibration["step"] += 1
+        counts = calibration["counts"]
+        min_count = min(counts.values())
+        round_complete = calibration["step"] % 4 == 0
+
+        if round_complete and min_count >= ENHANCED_TARGET_SAMPLES:
+            self.refresh_enhanced_status()
+            quality = self.status.get("enhancedQuality") or {}
+            accuracy = float(quality.get("accuracy", 0.0) or 0.0)
+            legacy = self.status.get("calibrationQuality") or {}
+            target = max(0.90, float(legacy.get("accuracy", 0.0) or 0.0))
+            if accuracy >= target or min_count >= ENHANCED_MAX_SAMPLES:
+                calibration["complete"] = True
+                calibration["armed"] = False
+                calibration["quality"] = quality
+                self._refresh_active_model()
+                return
+
+        if calibration["step"] >= len(calibration["sequence"]):
+            calibration["complete"] = True
+            calibration["armed"] = False
+            self.refresh_enhanced_status()
+            calibration["quality"] = self.status.get("enhancedQuality")
+            return
+
+        calibration["zone"] = calibration["sequence"][calibration["step"]]
+        calibration["armed"] = False
+        self.audio_detector.reset(require_quiet=True)
+        self.calibration_armed_at = time.monotonic() + 0.28
 
     def drain_audio(self):
         while True:
@@ -149,12 +264,25 @@ class Daemon:
         kind = command.get("type")
         now = time.monotonic()
 
-        if kind == "calibrate":
+        if kind == "calibrate-enhanced":
+            self._start_enhanced_calibration(now)
+
+        elif kind == "reset-enhanced":
+            self.enhanced_classifier.samples = {}
+            self.enhanced_classifier._axis_cache = None
+            save_enhanced_classifier(self.enhanced_classifier)
+            self.status["calibration"] = None
+            self.status["lastCalibrationReject"] = None
+            self.drain_audio()
+            self.refresh_enhanced_status()
+
+        elif kind == "calibrate":
             zone = command["zone"]
             self.classifier.samples.pop(zone, None)
             self.classifier._axis_cache = None
             save_classifier(self.classifier)
             self.refresh_profile_status()
+            self._refresh_active_model()
             self.drain_audio()
             self.audio_detector.reset(require_quiet=True)
             self.calibration_armed_at = now + 0.22
@@ -185,6 +313,7 @@ class Daemon:
             self.pending = []
             self.drain_audio()
             self.refresh_profile_status()
+            self._refresh_active_model()
 
         elif kind == "action-test":
             self.status["lastAction"] = run_action(
@@ -208,7 +337,7 @@ class Daemon:
             self.drain_audio()
 
     def flush(self, cfg):
-        if not self.classifier.profile_ready():
+        if not self.active_profile_ready():
             self.pending = []
             return
         window = int(cfg.get("multiTapWindowMs", 420)) / 1000
@@ -288,8 +417,15 @@ class Daemon:
             return
 
         pcm = np.concatenate(capture["frames"], axis=0)
-        signature = location_signature(pcm)
-        if signature is None:
+        legacy_signature = location_signature(pcm)
+        need_enhanced = (
+            capture["mode"] == "enhanced-calibration"
+            or self.status.get("enhancedProfileReady")
+        )
+        enhanced_signature = (
+            enhanced_location_signature(pcm) if need_enhanced else None
+        )
+        if legacy_signature is None:
             if capture["mode"] == "test":
                 self.status["testEvent"] = {
                     "zone": None,
@@ -304,11 +440,47 @@ class Daemon:
         source = capture["source"]
         degraded = capture["degraded"]
 
+        if mode == "enhanced-calibration":
+            calibration = self.status.get("calibration")
+            if (
+                not calibration
+                or calibration.get("mode") != "enhanced-auto"
+                or calibration.get("complete")
+            ):
+                return
+            quality = capture_quality(pcm)
+            if enhanced_signature is None or not quality.get("ok"):
+                calibration["rejected"] = int(calibration.get("rejected", 0)) + 1
+                reason = quality.get("reason") if quality else "fingerprint-failed"
+                self.status["lastCalibrationReject"] = reason
+                calibration["lastReject"] = reason
+                self.audio_detector.reset(require_quiet=True)
+                self.calibration_armed_at = time.monotonic() + 0.30
+                return
+
+            zone = calibration["zone"]
+            if self.enhanced_classifier.sample_is_outlier(zone, enhanced_signature):
+                calibration["rejected"] = int(calibration.get("rejected", 0)) + 1
+                self.status["lastCalibrationReject"] = "outlier"
+                calibration["lastReject"] = "outlier"
+                self.audio_detector.reset(require_quiet=True)
+                self.calibration_armed_at = time.monotonic() + 0.30
+                return
+
+            self.enhanced_classifier.add(zone, enhanced_signature)
+            calibration["counts"][zone] = int(calibration["counts"].get(zone, 0)) + 1
+            calibration["lastQuality"] = quality
+            calibration["lastReject"] = None
+            self.status["lastCalibrationReject"] = None
+            save_enhanced_classifier(self.enhanced_classifier)
+            self._advance_enhanced_calibration()
+            return
+
         if mode == "calibration":
             calibration = self.status.get("calibration")
             if not calibration or calibration.get("complete"):
                 return
-            self.classifier.add(calibration["zone"], signature)
+            self.classifier.add(calibration["zone"], legacy_signature)
             calibration["have"] += 1
             save_classifier(self.classifier)
             self.refresh_profile_status()
@@ -322,12 +494,23 @@ class Daemon:
 
         if mode == "test":
             self.test_serial += 1
-            zone, confidence = self.classifier.classify(signature, 0.0)
+            use_enhanced = (
+                self.status.get("activeModel") == "v3-dispersion"
+                and enhanced_signature is not None
+            )
+            classifier = self.enhanced_classifier if use_enhanced else self.classifier
+            signature = enhanced_signature if use_enhanced else legacy_signature
+            zone, confidence = classifier.classify(signature, 0.0)
             limit = float(cfg.get("confidence", 72)) / 100
+            profile_for_test = (
+                self.status.get("enhancedProfile", {})
+                if use_enhanced else self.status.get("profile", {})
+            )
+            minimum = ENHANCED_MIN_SAMPLES if use_enhanced else CLASSIFIER_MIN_SAMPLES
             trained = [
                 zone_name
-                for zone_name, profile in self.status.get("profile", {}).items()
-                if int(profile.get("count", 0)) >= CLASSIFIER_MIN_SAMPLES
+                for zone_name, profile in profile_for_test.items()
+                if int(profile.get("count", 0)) >= minimum
             ]
             self.status["testEvent"] = {
                 "serial": self.test_serial,
@@ -338,10 +521,11 @@ class Daemon:
                 "triggerSource": source,
                 "degraded": degraded,
                 "trainedZones": trained,
-                "profileReady": self.status["profileReady"],
+                "profileReady": classifier.profile_ready(),
                 "reason": None if zone else "no-trained-zones",
                 "rms": round(float(capture["audioRms"]), 4),
-                "fingerprintVersion": 2,
+                "fingerprintVersion": 3 if use_enhanced else 2,
+                "model": self.status.get("activeModel"),
             }
             self.status["testActive"] = False
             self.status["testArmed"] = False
@@ -349,7 +533,13 @@ class Daemon:
             return
 
         if mode == "normal":
-            zone, confidence = self.classifier.classify(
+            use_enhanced = (
+                self.status.get("activeModel") == "v3-dispersion"
+                and enhanced_signature is not None
+            )
+            classifier = self.enhanced_classifier if use_enhanced else self.classifier
+            signature = enhanced_signature if use_enhanced else legacy_signature
+            zone, confidence = classifier.classify(
                 signature,
                 float(cfg.get("confidence", 72)) / 100,
             )
@@ -363,7 +553,8 @@ class Daemon:
                     "impulse": round(capture["impulse"], 4),
                     "triggerSource": source,
                     "degraded": degraded,
-                    "fingerprintVersion": 2,
+                    "fingerprintVersion": 3 if use_enhanced else 2,
+                    "model": self.status.get("activeModel"),
                 }
 
     def tick(self):
@@ -486,12 +677,16 @@ class Daemon:
                 and not calibration.get("complete")
                 and calibration.get("armed")
             ):
-                mode = "calibration"
+                mode = (
+                    "enhanced-calibration"
+                    if calibration.get("mode") == "enhanced-auto"
+                    else "calibration"
+                )
             elif self.status.get("testActive") and self.status.get("testArmed"):
                 mode = "test"
             elif (
                 cfg.get("enabled")
-                and self.status["profileReady"]
+                and self.active_profile_ready()
                 and now - self.last_accept
                 >= int(cfg.get("cooldownMs", 700)) / 1000
             ):

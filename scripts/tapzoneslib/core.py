@@ -5,10 +5,16 @@ import numpy as np
 
 ZONES = ("TL", "TR", "BL", "BR")
 PROFILE_VERSION = 2
+ENHANCED_PROFILE_VERSION = 3
 CLASSIFIER_MIN_SAMPLES = 5
+ENHANCED_MIN_SAMPLES = 8
+ENHANCED_TARGET_SAMPLES = 8
+ENHANCED_MAX_SAMPLES = 12
 DEFAULT_CALIBRATION_SAMPLES = 6
 LOCATION_SIGNATURE_SIZE = 30
+ENHANCED_SIGNATURE_SIZE = 58
 LOCATION_BANDS = ((80,350),(350,800),(800,1600),(1600,3200),(3200,6400),(6400,12000),(12000,20000))
+DISPERSION_BANDS = ((500,1200),(1200,2500),(2500,4500),(4500,7000),(7000,10000),(10000,14000),(14000,18000),(18000,22000))
 DEFAULT_ACTIONS = {"TL":{"1":"volume_up","2":"media_toggle","3":"next"},"TR":{"1":"volume_down","2":"previous","3":"media_toggle"},"BL":{"1":"previous","2":"volume_down","3":"none"},"BR":{"1":"next","2":"volume_up","3":"none"}}
 
 
@@ -301,6 +307,162 @@ def location_signature(pcm, rate=48000):
     return signature
 
 
+
+def _band_arrival(signal, rate, lo, hi, search_start, search_end):
+    """Return first robust narrow-band arrival sample, or None."""
+    n = len(signal)
+    if n < 256 or search_end <= search_start:
+        return None
+
+    nfft = _next_pow2(n)
+    spectrum = np.fft.rfft(signal, n=nfft)
+    freqs = np.fft.rfftfreq(nfft, 1 / rate)
+    mask = (freqs >= lo) & (freqs < hi)
+    if not np.any(mask):
+        return None
+
+    filtered = np.fft.irfft(spectrum * mask, n=nfft)[:n]
+    energy = filtered * filtered
+    smooth_n = max(4, int(rate * 0.00025))
+    kernel = np.ones(smooth_n, dtype=float) / smooth_n
+    envelope = np.convolve(energy, kernel, mode="same")
+
+    noise_end = max(1, min(search_start, int(rate * 0.025)))
+    baseline = envelope[:noise_end]
+    med = float(np.median(baseline))
+    mad = float(np.median(np.abs(baseline - med))) + 1e-12
+    local = envelope[search_start:search_end]
+    if len(local) == 0:
+        return None
+
+    peak = float(np.max(local))
+    threshold = max(med + 8.0 * mad, peak * 0.035)
+    above = local >= threshold
+    run = max(2, int(rate * 0.00008))
+    if len(above) < run:
+        return None
+
+    hits = np.convolve(above.astype(np.int8), np.ones(run, dtype=np.int8), mode="valid")
+    idx = np.flatnonzero(hits >= run)
+    if len(idx) == 0:
+        return None
+    return int(search_start + idx[0])
+
+
+def _dispersion_features(pcm, rate=48000):
+    """Frequency-specific arrival features inspired by UbiTap/S-UbiTap."""
+    x = pcm.astype(np.float64) / 32768.0
+    x = x - x.mean(axis=0, keepdims=True)
+    n = len(x)
+
+    # The daemon gives us two 20 ms pre-roll frames, then the trigger frame.
+    # Search around that trigger region and through the first 35 ms after it.
+    search_start = max(0, int(rate * 0.030))
+    search_end = min(n, int(rate * 0.095))
+
+    arrivals = [[], []]
+    for channel in (0, 1):
+        signal = x[:, channel]
+        for lo, hi in DISPERSION_BANDS:
+            arrivals[channel].append(
+                _band_arrival(signal, rate, lo, hi, search_start, search_end)
+            )
+
+    extras = []
+    rel_curves = []
+    valid_fractions = []
+    slopes = []
+    for channel in (0, 1):
+        vals = arrivals[channel]
+        valid = [v for v in vals if v is not None]
+        valid_fractions.append(len(valid) / len(vals))
+        if valid:
+            base = min(valid)
+            curve = [
+                2.5 if v is None
+                else float(np.clip((v - base) / (rate * 0.005), 0.0, 2.5))
+                for v in vals
+            ]
+        else:
+            curve = [2.5] * len(vals)
+        rel_curves.append(curve)
+        extras.extend(curve)
+
+        xs = np.arange(len(vals), dtype=float)
+        ok = np.array([v is not None for v in vals])
+        if int(ok.sum()) >= 3:
+            ys = np.array([vals[i] for i in range(len(vals)) if ok[i]], dtype=float)
+            xx = xs[ok]
+            slope = np.polyfit(xx, ys, 1)[0] / (rate * 0.001)
+            slopes.append(float(np.clip(slope, -2.0, 2.0)))
+        else:
+            slopes.append(0.0)
+
+    # Same-frequency inter-channel delay: useful for left/right.
+    for index in range(len(DISPERSION_BANDS)):
+        left = arrivals[0][index]
+        right = arrivals[1][index]
+        if left is None or right is None:
+            extras.append(0.0)
+        else:
+            extras.append(float(np.clip(
+                (left - right) / (rate * 0.0015), -2.0, 2.0
+            )))
+
+    extras.extend(slopes)
+    extras.extend(valid_fractions)
+    return np.array(extras, dtype=float)
+
+
+def enhanced_location_signature(pcm, rate=48000):
+    base = location_signature(pcm, rate)
+    if base is None:
+        return None
+    dispersion = _dispersion_features(pcm, rate)
+    signature = np.concatenate((base, dispersion))
+    if len(signature) != ENHANCED_SIGNATURE_SIZE or not np.all(np.isfinite(signature)):
+        return None
+    return signature
+
+
+def capture_quality(pcm, rate=48000):
+    """Conservative calibration quality gate; never stores raw audio."""
+    if pcm is None or pcm.ndim != 2 or len(pcm) < int(rate * 0.06):
+        return {"ok": False, "reason": "short-capture"}
+
+    x = pcm.astype(np.float64) / 32768.0
+    mono = x.mean(axis=1)
+    pre = mono[:max(1, int(rate * 0.02))]
+    active = mono[int(rate * 0.035):min(len(mono), int(rate * 0.10))]
+    if len(active) < 64:
+        active = mono
+
+    noise = float(np.sqrt(np.mean(pre * pre))) + 1e-9
+    signal = float(np.sqrt(np.mean(active * active))) + 1e-9
+    snr_db = 20.0 * math.log10(signal / noise)
+    peak = float(np.max(np.abs(active)))
+    clipped = float(np.mean(np.abs(active) >= 0.985))
+
+    # Finger taps should be broadband enough to excite several structural modes.
+    nfft = _next_pow2(len(active))
+    power = np.abs(np.fft.rfft(active * np.hanning(len(active)), n=nfft)) ** 2
+    freqs = np.fft.rfftfreq(nfft, 1 / rate)
+    total = float(power.sum()) + 1e-12
+    occupied = 0
+    for lo, hi in DISPERSION_BANDS:
+        mask = (freqs >= lo) & (freqs < hi)
+        if float(power[mask].sum() / total) >= 0.002:
+            occupied += 1
+
+    if clipped > 0.02:
+        return {"ok": False, "reason": "clipped", "snrDb": snr_db, "bands": occupied}
+    if snr_db < 7.0:
+        return {"ok": False, "reason": "too-noisy", "snrDb": snr_db, "bands": occupied}
+    if occupied < 3:
+        return {"ok": False, "reason": "not-broadband", "snrDb": snr_db, "bands": occupied}
+    return {"ok": True, "reason": None, "snrDb": snr_db, "bands": occupied, "peak": peak}
+
+
 def feature_vector(audio, accel, impulse):
     """Legacy compact vector retained for compatibility/tests."""
     a = accel if accel is not None else np.zeros(3)
@@ -533,6 +695,62 @@ class Classifier:
             "tbAccuracy": axis_correct["TB"] / max(total, 1),
             **info,
         }
+
+
+
+@dataclass
+class EnhancedClassifier(Classifier):
+    LR_FEATURE_SETS = Classifier.LR_FEATURE_SETS + tuple(
+        [(i,) for i in range(46,54)]
+        + [(46+i, 30+i) for i in range(8)]
+        + [(46+i, 38+i) for i in range(8)]
+        + [(46+i, 28) for i in range(8)]
+        + [(54,55), (56,57)]
+    )
+    TB_FEATURE_SETS = Classifier.TB_FEATURE_SETS + tuple(
+        [(i,) for i in range(30,46)]
+        + [(30+i, 38+i) for i in range(8)]
+        + [(30+i, 54) for i in range(8)]
+        + [(38+i, 55) for i in range(8)]
+        + [(54,), (55,), (54,55), (54,28), (55,28)]
+    )
+
+    def profile_ready(self):
+        return all(
+            len(self.samples.get(zone, [])) >= ENHANCED_MIN_SAMPLES
+            for zone in ZONES
+        )
+
+    def sample_is_outlier(self, zone, vector):
+        raw = self.samples.get(zone, [])
+        if len(raw) < 4:
+            return False
+        matrix = np.asarray(raw, float)
+        vector = np.asarray(vector, float)
+        if matrix.shape[1] != len(vector):
+            return False
+        median = np.median(matrix, axis=0)
+        mad = np.median(np.abs(matrix - median), axis=0) * 1.4826
+        scale = np.maximum(mad, 0.035)
+        distance = float(np.median(np.abs((vector - median) / scale)))
+        return distance > 5.5
+
+
+def load_enhanced_classifier():
+    data = read_json(xdg("state","profile-v3.json"), {})
+    if data.get("version") != ENHANCED_PROFILE_VERSION:
+        return EnhancedClassifier({})
+    samples = data.get("samples", {})
+    return EnhancedClassifier(samples if isinstance(samples, dict) else {})
+
+
+def save_enhanced_classifier(c):
+    atomic_json(xdg("state","profile-v3.json"), {
+        "version": ENHANCED_PROFILE_VERSION,
+        "samples": c.samples,
+        "profile": c.profile(),
+    })
+
 
 
 def load_classifier():

@@ -16,6 +16,10 @@ from tapzoneslib.core import (
     discover_accel,
     feature_vector,
     location_signature,
+    enhanced_location_signature,
+    capture_quality,
+    ENHANCED_SIGNATURE_SIZE,
+    EnhancedClassifier,
     microphone_transient_gate,
     trigger_decision,
     tap_gate_features,
@@ -44,6 +48,49 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(f["audio_ok"])
         self.assertLess(f["lag"], 0)
         self.assertTrue(all(np.isfinite(list(f.values())[1:])))
+
+    def test_enhanced_signature_adds_dispersion_information(self):
+        rate = 48000
+        n = 5760
+
+        def dispersive(spread, right_shift):
+            x = np.zeros((n, 2), dtype=float)
+            bands = [800, 1800, 3500, 6000, 9000, 12500, 16000, 20500]
+            base = 2100
+            for index, frequency in enumerate(bands):
+                delay = (len(bands) - 1 - index) * spread
+                start = base + delay
+                k = np.arange(max(0, n - start))
+                wave = np.sin(2*np.pi*frequency*k/rate) * np.exp(-k/(rate*0.010))
+                if len(k):
+                    x[start:, 0] += wave
+                rstart = start + right_shift
+                if rstart < n:
+                    kr = np.arange(n-rstart)
+                    x[rstart:, 1] += 0.8*np.sin(2*np.pi*frequency*kr/rate) * np.exp(-kr/(rate*0.010))
+            x /= max(np.max(np.abs(x)), 1e-9)
+            return (x * 18000).astype("<i2")
+
+        near = enhanced_location_signature(dispersive(2, -2))
+        far = enhanced_location_signature(dispersive(9, 4))
+        self.assertEqual(near.shape, (ENHANCED_SIGNATURE_SIZE,))
+        self.assertEqual(far.shape, (ENHANCED_SIGNATURE_SIZE,))
+        self.assertTrue(np.all(np.isfinite(near)))
+        self.assertGreater(
+            np.linalg.norm(near[30:] - far[30:]),
+            np.linalg.norm(near[:30] - far[:30]),
+        )
+
+    def test_enhanced_classifier_needs_eight_samples_per_corner(self):
+        classifier = EnhancedClassifier({})
+        sample = np.zeros(ENHANCED_SIGNATURE_SIZE)
+        for zone in ("TL", "TR", "BL", "BR"):
+            for _ in range(7):
+                classifier.add(zone, sample)
+        self.assertFalse(classifier.profile_ready())
+        for zone in ("TL", "TR", "BL", "BR"):
+            classifier.add(zone, sample)
+        self.assertTrue(classifier.profile_ready())
 
     def test_location_signature_is_fixed_size_and_stereo_sensitive(self):
         rate = 48000

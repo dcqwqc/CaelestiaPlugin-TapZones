@@ -134,6 +134,147 @@ class DaemonV2Tests(unittest.TestCase):
         )
         self.assertFalse(daemon.status["testActive"])
 
+    def test_enhanced_calibration_stores_only_good_v3_sample(self):
+        legacy = Mock()
+        legacy.profile.return_value = {}
+        legacy.profile_ready.return_value = True
+        enhanced = Mock()
+        enhanced.profile.return_value = {}
+        enhanced.profile_ready.return_value = False
+        enhanced.validation_accuracy.return_value = None
+        enhanced.axis_model_info.return_value = None
+        enhanced.sample_is_outlier.return_value = False
+
+        daemon = self._daemon_for_finish(legacy, "enhanced-calibration")
+        daemon.enhanced_classifier = enhanced
+        daemon.status.update({
+            "calibration": {
+                "mode": "enhanced-auto",
+                "zone": "TL",
+                "counts": {"TL": 0, "TR": 0, "BL": 0, "BR": 0},
+                "rejected": 0,
+                "complete": False,
+            },
+            "enhancedProfileReady": False,
+            "enhancedQuality": None,
+        })
+        signature = np.linspace(-1, 1, 58)
+
+        with patch(
+            "tapzoneslib.daemon.location_signature",
+            return_value=np.zeros(30),
+        ), patch(
+            "tapzoneslib.daemon.enhanced_location_signature",
+            return_value=signature,
+        ), patch(
+            "tapzoneslib.daemon.capture_quality",
+            return_value={"ok": True, "reason": None, "snrDb": 18, "bands": 7},
+        ), patch(
+            "tapzoneslib.daemon.save_enhanced_classifier",
+        ), patch.object(
+            daemon, "_advance_enhanced_calibration",
+        ) as advance:
+            daemon._finish_fingerprint_capture({"confidence": 72})
+
+        enhanced.add.assert_called_once()
+        self.assertEqual(enhanced.add.call_args.args[0], "TL")
+        np.testing.assert_allclose(enhanced.add.call_args.args[1], signature)
+        self.assertEqual(daemon.status["calibration"]["counts"]["TL"], 1)
+        legacy.add.assert_not_called()
+        advance.assert_called_once()
+
+    def test_enhanced_calibration_rejects_bad_capture_without_training(self):
+        legacy = Mock()
+        legacy.profile.return_value = {}
+        legacy.profile_ready.return_value = True
+        enhanced = Mock()
+        enhanced.profile.return_value = {}
+        enhanced.profile_ready.return_value = False
+        enhanced.validation_accuracy.return_value = None
+        enhanced.axis_model_info.return_value = None
+
+        daemon = self._daemon_for_finish(legacy, "enhanced-calibration")
+        daemon.enhanced_classifier = enhanced
+        daemon.audio_detector = Mock()
+        daemon.status.update({
+            "calibration": {
+                "mode": "enhanced-auto",
+                "zone": "BR",
+                "counts": {"TL": 0, "TR": 0, "BL": 0, "BR": 0},
+                "rejected": 0,
+                "complete": False,
+            },
+            "enhancedProfileReady": False,
+            "enhancedQuality": None,
+        })
+
+        with patch(
+            "tapzoneslib.daemon.location_signature",
+            return_value=np.zeros(30),
+        ), patch(
+            "tapzoneslib.daemon.enhanced_location_signature",
+            return_value=np.zeros(58),
+        ), patch(
+            "tapzoneslib.daemon.capture_quality",
+            return_value={"ok": False, "reason": "too-noisy"},
+        ):
+            daemon._finish_fingerprint_capture({"confidence": 72})
+
+        enhanced.add.assert_not_called()
+        self.assertEqual(daemon.status["calibration"]["counts"]["BR"], 0)
+        self.assertEqual(daemon.status["calibration"]["rejected"], 1)
+        self.assertEqual(daemon.status["lastCalibrationReject"], "too-noisy")
+
+    def test_enhanced_sequence_is_balanced_and_interleaved(self):
+        sequence = Daemon._enhanced_sequence(8)
+        self.assertEqual(len(sequence), 32)
+        for zone in ("TL", "TR", "BL", "BR"):
+            self.assertEqual(sequence.count(zone), 8)
+        for offset in range(0, len(sequence), 4):
+            self.assertEqual(
+                set(sequence[offset:offset + 4]),
+                {"TL", "TR", "BL", "BR"},
+            )
+
+    def test_v3_never_promotes_below_v2_validation(self):
+        daemon = Daemon.__new__(Daemon)
+        daemon.classifier = Mock()
+        daemon.enhanced_classifier = Mock()
+        daemon.classifier.profile_ready.return_value = True
+        daemon.enhanced_classifier.profile_ready.return_value = True
+        daemon.status = {
+            "profileReady": True,
+            "enhancedProfileReady": True,
+            "calibrationQuality": {"accuracy": 0.9167},
+            "enhancedQuality": {"accuracy": 0.90},
+        }
+        daemon._refresh_active_model()
+        self.assertEqual(daemon.status["activeModel"], "v2-axis")
+        self.assertEqual(daemon.status["fingerprintVersion"], 2)
+
+        daemon.status["enhancedQuality"] = {"accuracy": 0.9583}
+        daemon._refresh_active_model()
+        self.assertEqual(daemon.status["activeModel"], "v3-dispersion")
+        self.assertEqual(daemon.status["fingerprintVersion"], 3)
+
+    def test_v3_requires_ninety_percent_even_without_v2(self):
+        daemon = Daemon.__new__(Daemon)
+        daemon.classifier = Mock()
+        daemon.enhanced_classifier = Mock()
+        daemon.classifier.profile_ready.return_value = False
+        daemon.enhanced_classifier.profile_ready.return_value = True
+        daemon.status = {
+            "profileReady": False,
+            "enhancedProfileReady": True,
+            "calibrationQuality": None,
+            "enhancedQuality": {"accuracy": 0.875},
+        }
+        daemon._refresh_active_model()
+        self.assertEqual(daemon.status["activeModel"], "v2-axis")
+        daemon.status["enhancedQuality"] = {"accuracy": 0.90}
+        daemon._refresh_active_model()
+        self.assertEqual(daemon.status["activeModel"], "v3-dispersion")
+
     def test_normal_mode_rejects_uncertain_location(self):
         classifier = Mock()
         classifier.profile.return_value = {

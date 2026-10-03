@@ -66,3 +66,13 @@ The plugin settings include a one-shot classifier playground. Press Test, tap on
 ### Adaptive tap detection
 
 When the accelerometer is unavailable, Tap Zones uses a stateful microphone detector rather than a fixed loudness threshold. It learns the local noise floor from quiet 20 ms windows, requires a fast RMS + peak onset, emits once per rising edge, and will not re-arm until the impact has released. Calibration also waits for quiet after the button press before it accepts a sample, so the UI click/handling noise cannot become the corner sample.
+
+## Research v3: dispersion-aware localization
+
+The optional v3 model is informed by published surface-impact localization work such as **UbiTap / S-UbiTap**, **MM-Tap**, and open-source **SurfaceTap**. Those systems show why a single broadband inter-microphone delay is fragile on rigid surfaces: structural waves are dispersive, so different frequencies arrive at different times and propagation behavior depends on the surface.
+
+Mirai exposes only a 48 kHz two-channel raw DMIC, so Tap Zones does **not** copy UbiTap's 192 kHz / 3+ microphone geometry. Instead v3 keeps v2's robust axis decomposition and adds frequency-specific arrival curves over eight bands, per-band left/right arrival differences, dispersion slopes, and arrival-validity features. It learns the useful dimensions from Mirai's own calibration data.
+
+The **Best calibration** flow deliberately interleaves TL/TR/BL/BR rather than collecting one corner in a long block, reducing time/order drift. It rejects clipped, low-SNR, non-broadband, and strong outlier samples. It starts with eight accepted taps per corner and can extend to twelve. v3 is stored separately in `profile-v3.json` and **cannot replace v2 unless its own leave-one-out validation is at least 90% and at least as good as the currently validated v2 model**. If it does not beat the fallback, v2 stays active.
+
+Use **Start best calibration** in the native settings page and follow the alternating corner prompts. Tap only while the large button says `TAP … NOW`; rejected captures simply request the same corner again. The UI reports v2/v3 validation separately and shows which model is active.
