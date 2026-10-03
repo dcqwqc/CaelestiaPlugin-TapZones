@@ -1,0 +1,5 @@
+#!/usr/bin/env python3
+"""Local-only Tap Zones controller. The daemon stores feature vectors, never PCM."""
+from tapzoneslib import main
+if __name__ == "__main__":
+    raise SystemExit(main())

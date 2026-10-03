@@ -1,0 +1,17 @@
+[Unit]
+Description=Caelestia Tap Zones local detector
+After=pipewire.service wireplumber.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/share/caelestia/plugins/tapzones/scripts/tapzones daemon
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+StateDirectory=tapzones
+RuntimeDirectory=tapzones
+
+[Install]
+WantedBy=default.target

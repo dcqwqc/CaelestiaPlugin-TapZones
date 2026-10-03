@@ -1,0 +1,13 @@
+import argparse,json
+from .core import ZONES,discover_accel,read_json,run_action,xdg,atomic_json
+from .daemon import run
+def main():
+ p=argparse.ArgumentParser();s=p.add_subparsers(dest="cmd",required=True);s.add_parser("daemon");s.add_parser("status");c=s.add_parser("calibrate");c.add_argument("zone",choices=ZONES);c.add_argument("--count",type=int,default=12);s.add_parser("reset");a=s.add_parser("action-test");a.add_argument("action");a.add_argument("--custom-json",default="[]");s.add_parser("accel-discover");args=p.parse_args()
+ if args.cmd=="daemon":run();return 0
+ if args.cmd=="status":print(json.dumps(read_json(xdg("runtime","status.json"),{"running":False,"accel":str(discover_accel() or "unavailable")})));return 0
+ if args.cmd=="accel-discover":print(str(discover_accel() or ""));return 0 if discover_accel() else 1
+ if args.cmd=="action-test":
+  try:custom=json.loads(args.custom_json)
+  except json.JSONDecodeError:custom=[]
+  print(json.dumps(run_action(args.action,True,custom)));return 0
+ cmd={"type":args.cmd,"zone":getattr(args,"zone",None),"count":getattr(args,"count",None)};atomic_json(xdg("runtime","command.json"),cmd);return 0
