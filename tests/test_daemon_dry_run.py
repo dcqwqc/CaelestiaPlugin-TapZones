@@ -1,102 +1,158 @@
-import json, os, queue, subprocess, sys, tempfile, unittest
+import json
+import os
+import sys
+import tempfile
+import unittest
 from unittest.mock import Mock, patch
+
 import numpy as np
-ROOT=os.path.join(os.path.dirname(__file__),"..")
+
+ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
+
 from tapzoneslib.daemon import Daemon
-class DaemonCliTests(unittest.TestCase):
- def test_action_dry_run_and_status(self):
-  e=os.environ.copy();e["XDG_RUNTIME_DIR"]=tempfile.mkdtemp(); e["XDG_STATE_HOME"]=tempfile.mkdtemp(); e["XDG_CONFIG_HOME"]=tempfile.mkdtemp()
-  p=subprocess.run([sys.executable,os.path.join(ROOT,"scripts/tapzones.py"),"action-test","volume_up"],env=e,text=True,capture_output=True,check=True)
-  self.assertTrue(json.loads(p.stdout)["dry_run"])
-  p=subprocess.run([sys.executable,os.path.join(ROOT,"scripts/tapzones.py"),"status"],env=e,text=True,capture_output=True,check=True)
-  status=json.loads(p.stdout)
-  self.assertFalse(status["running"])
-  self.assertEqual(status["triggerSource"],"unavailable")
-  self.assertTrue(status["degraded"])
-  self.assertFalse(status["profileReady"])
- def test_detection_does_not_classify_before_profile_ready(self):
-  classifier=Mock();classifier.profile.return_value={};classifier.profile_ready.return_value=False
-  daemon=Daemon.__new__(Daemon)
-  daemon.accel_device=object();daemon.classifier=classifier
-  daemon.status={"calibration":None,"profile":{},"profileReady":False}
-  daemon.q=queue.Queue();daemon.prev=np.zeros(3);daemon.last_accept=0.;daemon.pending=[];daemon.command=lambda:None
-  cfg={"enabled":True,"sensitivity":55,"confidence":72,"accelPolicy":"required","cooldownMs":700,"multiTapWindowMs":420}
-  with patch("tapzoneslib.daemon.effective_config",return_value=cfg), patch("tapzoneslib.daemon.accel_sample",return_value=np.ones(3)):
-   daemon.tick()
-  classifier.classify.assert_not_called()
-  self.assertEqual(daemon.pending,[])
-  self.assertFalse(daemon.status["profileReady"])
- def test_off_policy_calibrates_and_detects_without_an_accel_impulse(self):
-  transient={"audio_ok":True,"rms":.02,"crest":3.0}
-  cfg={"enabled":True,"sensitivity":55,"confidence":72,"accelPolicy":"off","cooldownMs":700,"multiTapWindowMs":420}
 
-  calibrating=Mock();calibrating.profile.return_value={};calibrating.profile_ready.return_value=False
-  calibration_daemon=Daemon.__new__(Daemon)
-  calibration_daemon.accel_device=object();calibration_daemon.classifier=calibrating
-  calibration_daemon.status={"calibration":{"zone":"TL","need":3,"have":0},"profile":{},"profileReady":False}
-  calibration_daemon.q=queue.Queue();calibration_daemon.q.put(object());calibration_daemon.prev=np.zeros(3);calibration_daemon.last_accept=0.;calibration_daemon.pending=[];calibration_daemon.command=lambda:None
-  with patch("tapzoneslib.daemon.effective_config",return_value=cfg), patch("tapzoneslib.daemon.accel_sample",return_value=np.zeros(3)), patch("tapzoneslib.daemon.audio_features",return_value=transient), patch("tapzoneslib.daemon.save_classifier"):
-   calibration_daemon.tick()
-  calibrating.add.assert_called_once()
 
-  detecting=Mock();detecting.profile.return_value={};detecting.profile_ready.return_value=True;detecting.classify.return_value=("TL",.99)
-  detection_daemon=Daemon.__new__(Daemon)
-  detection_daemon.accel_device=object();detection_daemon.classifier=detecting
-  detection_daemon.status={"calibration":None,"profile":{},"profileReady":True}
-  detection_daemon.q=queue.Queue();detection_daemon.q.put(object());detection_daemon.prev=np.zeros(3);detection_daemon.last_accept=0.;detection_daemon.pending=[];detection_daemon.command=lambda:None
-  with patch("tapzoneslib.daemon.effective_config",return_value=cfg), patch("tapzoneslib.daemon.accel_sample",return_value=np.zeros(3)), patch("tapzoneslib.daemon.audio_features",return_value=transient):
-   detection_daemon.tick()
-  detecting.classify.assert_called_once()
-  self.assertEqual(detection_daemon.status["lastEvent"]["triggerSource"],"microphone")
- def test_microphone_trigger_has_no_accelerometer_features(self):
-  transient={"audio_ok":True,"rms":.02,"crest":3.0}
-  for policy,accel in (("off",np.array([3.,4.,0.])),("preferred",None)):
-   with self.subTest(policy=policy):
-    classifier=Mock();classifier.profile.return_value={};classifier.profile_ready.return_value=True;classifier.classify.return_value=("TL",.99)
-    daemon=Daemon.__new__(Daemon)
-    daemon.accel_device=object();daemon.classifier=classifier
-    daemon.status={"calibration":None,"profile":{},"profileReady":True}
-    daemon.q=queue.Queue();daemon.q.put(object());daemon.prev=np.zeros(3);daemon.last_accept=0.;daemon.pending=[];daemon.command=lambda:None
-    cfg={"enabled":True,"sensitivity":55,"confidence":72,"accelPolicy":policy,"cooldownMs":700,"multiTapWindowMs":420}
-    with patch("tapzoneslib.daemon.effective_config",return_value=cfg), patch("tapzoneslib.daemon.accel_sample",return_value=accel), patch("tapzoneslib.daemon.audio_features",return_value=transient), patch("tapzoneslib.daemon.feature_vector",return_value=np.zeros(13)) as feature:
-     daemon.tick()
-    feature.assert_called_once()
-    self.assertIsNone(feature.call_args.args[1])
-    self.assertEqual(feature.call_args.args[2],0.)
-    self.assertEqual(daemon.status["triggerSource"],"microphone")
- def test_live_test_classifies_without_running_actions(self):
-  transient={"audio_ok":True,"rms":.02,"crest":3.0}
-  classifier=Mock();classifier.profile.return_value={"TL":{"count":3},"TR":{"count":3},"BL":{"count":3},"BR":{"count":3}};classifier.profile_ready.return_value=True;classifier.classify.return_value=("BR",.81)
-  daemon=Daemon.__new__(Daemon)
-  daemon.accel_device=object();daemon.classifier=classifier
-  daemon.status={"calibration":None,"profile":classifier.profile(),"profileReady":True,"lastAction":None,"testActive":True,"testEvent":None}
-  daemon.q=queue.Queue();daemon.q.put(object());daemon.prev=np.zeros(3);daemon.last_accept=0.;daemon.pending=[];daemon.command=lambda:None
-  daemon.test_serial=0
-  cfg={"enabled":True,"sensitivity":55,"confidence":72,"accelPolicy":"off","cooldownMs":700,"multiTapWindowMs":420}
-  with patch("tapzoneslib.daemon.effective_config",return_value=cfg), patch("tapzoneslib.daemon.accel_sample",return_value=np.zeros(3)), patch("tapzoneslib.daemon.audio_features",return_value=transient), patch("tapzoneslib.daemon.run_action") as action:
-   daemon.tick()
-  classifier.classify.assert_called_once()
-  action.assert_not_called()
-  self.assertEqual(daemon.status["testEvent"]["zone"],"BR")
-  self.assertTrue(daemon.status["testEvent"]["accepted"])
-  self.assertFalse(daemon.status["testActive"])
-  self.assertEqual(daemon.pending,[])
- def test_live_test_with_zero_trained_zones_still_runs_safely(self):
-  transient={"audio_ok":True,"rms":.02,"crest":3.0}
-  classifier=Mock();classifier.profile.return_value={};classifier.profile_ready.return_value=False;classifier.classify.return_value=(None,0.0)
-  daemon=Daemon.__new__(Daemon)
-  daemon.accel_device=object();daemon.classifier=classifier
-  daemon.status={"calibration":None,"profile":{},"profileReady":False,"lastAction":None,"testActive":True,"testEvent":None}
-  daemon.q=queue.Queue();daemon.q.put(object());daemon.prev=np.zeros(3);daemon.last_accept=0.;daemon.pending=[];daemon.command=lambda:None
-  daemon.test_serial=0
-  cfg={"enabled":True,"sensitivity":55,"confidence":72,"accelPolicy":"off","cooldownMs":700,"multiTapWindowMs":420}
-  with patch("tapzoneslib.daemon.effective_config",return_value=cfg), patch("tapzoneslib.daemon.accel_sample",return_value=np.zeros(3)), patch("tapzoneslib.daemon.audio_features",return_value=transient), patch("tapzoneslib.daemon.run_action") as action:
-   daemon.tick()
-  classifier.classify.assert_called_once()
-  action.assert_not_called()
-  self.assertFalse(daemon.status["testActive"])
-  self.assertEqual(daemon.status["testEvent"]["reason"],"no-trained-zones")
-  self.assertEqual(daemon.status["testEvent"]["trainedZones"],[])
-  self.assertEqual(daemon.pending,[])
-if __name__=="__main__":unittest.main()
+class DaemonV2Tests(unittest.TestCase):
+    def test_action_dry_run_and_status(self):
+        env = os.environ.copy()
+        env["XDG_RUNTIME_DIR"] = tempfile.mkdtemp()
+        env["XDG_STATE_HOME"] = tempfile.mkdtemp()
+        env["XDG_CONFIG_HOME"] = tempfile.mkdtemp()
+        import subprocess
+
+        proc = subprocess.run(
+            [
+                sys.executable,
+                os.path.join(ROOT, "scripts/tapzones.py"),
+                "action-test",
+                "volume_up",
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.assertTrue(json.loads(proc.stdout)["dry_run"])
+
+        proc = subprocess.run(
+            [
+                sys.executable,
+                os.path.join(ROOT, "scripts/tapzones.py"),
+                "status",
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        status = json.loads(proc.stdout)
+        self.assertFalse(status["running"])
+        self.assertFalse(status["profileReady"])
+        self.assertEqual(status["fingerprintVersion"], 2)
+
+    def _daemon_for_finish(self, classifier, mode):
+        daemon = Daemon.__new__(Daemon)
+        daemon.classifier = classifier
+        daemon.pending = []
+        daemon.last_accept = 0.0
+        daemon.test_serial = 0
+        daemon.fingerprint_capture = {
+            "mode": mode,
+            "frames": [np.zeros((960, 2), dtype="<i2")] * 5,
+            "source": "microphone",
+            "degraded": True,
+            "impulse": 0.0,
+            "audioRms": 0.03,
+            "postFrames": 3,
+        }
+        daemon.status = {
+            "calibration": None,
+            "profile": classifier.profile(),
+            "profileReady": classifier.profile_ready(),
+            "calibrationQuality": None,
+            "testActive": mode == "test",
+            "testArmed": mode == "test",
+            "testEvent": None,
+            "capturingFingerprint": True,
+            "lastEvent": None,
+        }
+        return daemon
+
+    def test_calibration_stores_v2_fingerprint(self):
+        classifier = Mock()
+        classifier.profile.return_value = {}
+        classifier.profile_ready.return_value = False
+        classifier.validation_accuracy.return_value = None
+        daemon = self._daemon_for_finish(classifier, "calibration")
+        daemon.status["calibration"] = {
+            "zone": "TR",
+            "need": 6,
+            "have": 0,
+            "armed": False,
+        }
+        signature = np.linspace(-1, 1, 30)
+
+        with patch(
+            "tapzoneslib.daemon.location_signature",
+            return_value=signature,
+        ), patch("tapzoneslib.daemon.save_classifier"):
+            daemon._finish_fingerprint_capture({"confidence": 72})
+
+        classifier.add.assert_called_once()
+        self.assertEqual(classifier.add.call_args.args[0], "TR")
+        np.testing.assert_allclose(classifier.add.call_args.args[1], signature)
+        self.assertEqual(daemon.status["calibration"]["have"], 1)
+
+    def test_live_test_classifies_completed_fingerprint_without_action(self):
+        classifier = Mock()
+        classifier.profile.return_value = {
+            zone: {"count": 6} for zone in ("TL", "TR", "BL", "BR")
+        }
+        classifier.profile_ready.return_value = True
+        classifier.validation_accuracy.return_value = {
+            "accuracy": 0.9,
+            "correct": 22,
+            "total": 24,
+        }
+        classifier.classify.return_value = ("BR", 0.86)
+        daemon = self._daemon_for_finish(classifier, "test")
+
+        with patch(
+            "tapzoneslib.daemon.location_signature",
+            return_value=np.ones(30),
+        ), patch("tapzoneslib.daemon.run_action") as action:
+            daemon._finish_fingerprint_capture({"confidence": 72})
+
+        action.assert_not_called()
+        classifier.classify.assert_called_once()
+        self.assertEqual(daemon.status["testEvent"]["zone"], "BR")
+        self.assertTrue(daemon.status["testEvent"]["accepted"])
+        self.assertEqual(
+            daemon.status["testEvent"]["fingerprintVersion"],
+            2,
+        )
+        self.assertFalse(daemon.status["testActive"])
+
+    def test_normal_mode_rejects_uncertain_location(self):
+        classifier = Mock()
+        classifier.profile.return_value = {
+            zone: {"count": 6} for zone in ("TL", "TR", "BL", "BR")
+        }
+        classifier.profile_ready.return_value = True
+        classifier.validation_accuracy.return_value = None
+        classifier.classify.return_value = (None, 0.55)
+        daemon = self._daemon_for_finish(classifier, "normal")
+
+        with patch(
+            "tapzoneslib.daemon.location_signature",
+            return_value=np.ones(30),
+        ):
+            daemon._finish_fingerprint_capture({"confidence": 72})
+
+        self.assertEqual(daemon.pending, [])
+        self.assertIsNone(daemon.status["lastEvent"])
+
+
+if __name__ == "__main__":
+    unittest.main()

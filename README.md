@@ -4,9 +4,11 @@ Tap Zones is a local-only four-corner laptop-tap detector for Caelestia. It is i
 
 ## Privacy and architecture
 
-`tapzones.service` reads accelerometer samples from the dynamically found `accel_3d` IIO device (about 10 Hz) and asks PipeWire's `pw-record` for the current default stereo source. Raw 48 kHz PCM is held only in a short in-memory window and is never written, sent, or logged. The persisted XDG state profile contains normalized feature vectors and centroid/std-dev summaries only.
+`tapzones.service` reads accelerometer samples from the dynamically found `accel_3d` IIO device (about 10 Hz) and asks PipeWire's `pw-record` for the current default stereo source. Raw 48 kHz PCM is held only in a short in-memory window and is never written, sent, or logged. The persisted XDG state profile contains normalized numeric fingerprints only.
 
-Features combine acceleration direction and impulse, stereo energy balance, cross-correlation/TDOA lag, RMS/crest/decay, FFT centroid, and three FFT bands. A normalized nearest-centroid classifier rejects low-confidence and out-of-distribution observations.
+Tap detection and location are separate. Detection stays low-latency on 20 ms windows. Once an impact is accepted, Tap Zones keeps a short ~80–100 ms in-memory stereo snippet around that onset and derives a v2 location fingerprint: GCC-PHAT stereo delay, left/right level ratios, seven normalized frequency bands plus their left/right asymmetry, per-channel spectral centroids, and the early decay envelope. Raw PCM is discarded immediately after the fingerprint is calculated.
+
+The v2 classifier learns which fingerprint dimensions actually separate TL/TR/BL/BR on this laptop. It uses robust median/MAD corner models, data-driven feature weights, local-neighbour distance, confidence rejection, and leave-one-out calibration validation.
 
 ## Trigger policy and calibration readiness
 
@@ -16,7 +18,7 @@ The same trigger policy gates both guided calibration samples and normal tap det
 - `preferred` uses the accelerometer whenever it can be sampled. Only while samples are unavailable does it degrade to a conservative microphone transient gate (both sufficient RMS and crest are required).
 - `off` intentionally uses that microphone transient gate and ignores the accelerometer gate.
 
-The diagnostics panel reports the active trigger source and whether `preferred` is currently in microphone-only fallback; when accelerometer samples cannot be read, it notes that a reboot may restore accelerometer accuracy. In either microphone-only mode, the feature vector uses zero acceleration and zero impulse. It also reports calibration readiness. Detection cannot classify a tap or run an action until **TL, TR, BL, and BR each contain at least three samples**, even if the detector is enabled. The default guided count remains 12 samples per corner for a better profile.
+The diagnostics panel reports the active trigger source and whether `preferred` is currently in microphone-only fallback; when accelerometer samples cannot be read, it notes that a reboot may restore accelerometer accuracy. Detection cannot classify a location or run an action until **TL, TR, BL, and BR each contain at least five v2 fingerprints**. Guided calibration defaults to **six taps per corner** so the sixth sample can also be used for leave-one-out quality validation.
 
 ## Install, calibrate, use
 
@@ -24,7 +26,7 @@ The diagnostics panel reports the active trigger source and whether `preferred` 
 ./install.sh install
 ```
 
-Enable `dcqwqc/tapzones` in Caelestia, open its native settings page, keep the laptop in its usual position, and tap TL, TR, BL, and BR for the prompted 12 samples each. Then enable detection. Settings cover sensitivity, confidence, accelerometer policy, cooldown, grouping window, calibration count and each zone's one/two/three-tap action.
+Enable `dcqwqc/tapzones` in Caelestia, open its native settings page, keep the laptop in its usual position, and calibrate TL, TR, BL, and BR for the prompted **six taps each**. Tap only when the selected corner says `TAP NOW`; the UI shows the resulting cross-validation quality after all four corners are ready. Then enable detection. Settings cover sensitivity, confidence, accelerometer policy, cooldown, grouping window, calibration count and each zone's one/two/three-tap action.
 
 Built-ins use fixed argv (`wpctl` for volume and dynamically discovered MPRIS calls via `busctl` for media), never a shell. `quick_settings` remains safely unavailable when no stable local Caelestia IPC action is discoverable. Optional custom actions may be supplied by overriding an action with `{"type":"custom","argv":["program","literal-argument"]}` in `~/.config/tapzones/config.json`; no interpolation is performed.
 
@@ -60,4 +62,7 @@ The second command removes only saved feature profiles/configuration; it does no
 
 ### Live recognition test
 
-The plugin settings include a one-shot classifier playground. Press Test, tap once, and the result freezes immediately; press Test again for the next sample. With trained zones the UI highlights the predicted TL/TR/BL/BR zone, confidence and trigger source. With no trained zones it reports that the tap was detected but does not invent a location. Normal mapped actions are always suppressed during the test.
+The plugin settings include a one-shot classifier playground. Press Test, tap once, and the result freezes after the short stereo fingerprint window completes; press Test again for the next sample. With trained zones the UI highlights the predicted TL/TR/BL/BR zone, confidence and trigger source. With no trained zones it reports that the tap was detected but does not invent a location. Normal mapped actions are always suppressed during the test.
+### Adaptive tap detection
+
+When the accelerometer is unavailable, Tap Zones uses a stateful microphone detector rather than a fixed loudness threshold. It learns the local noise floor from quiet 20 ms windows, requires a fast RMS + peak onset, emits once per rising edge, and will not re-arm until the impact has released. Calibration also waits for quiet after the button press before it accepts a sample, so the UI click/handling noise cannot become the corner sample.

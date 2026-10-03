@@ -9,7 +9,7 @@ SettingsObject {
     property string accelPolicy: "preferred"
     property int cooldownMs: 700
     property int multiTapWindowMs: 420
-    property int calibrationCount: 3
+    property int calibrationCount: 6
     property string actionsJson: "{\"TL\":{\"1\":\"volume_up\",\"2\":\"media_toggle\",\"3\":\"next\"},\"TR\":{\"1\":\"volume_down\",\"2\":\"previous\",\"3\":\"media_toggle\"},\"BL\":{\"1\":\"previous\",\"2\":\"volume_down\",\"3\":\"none\"},\"BR\":{\"1\":\"next\",\"2\":\"volume_up\",\"3\":\"none\"}}"
 
     SettingMeta on enabled {

@@ -137,7 +137,7 @@ ColumnLayout {
     }
 
     function calibrate(zone): void {
-        calibration.command = [helper, "calibrate", zone, "--count", String(settings?.calibrationCount ?? 12)];
+        calibration.command = [helper, "calibrate", zone, "--count", String(settings?.calibrationCount ?? 6)];
         calibration.running = true;
         refreshTimer.restart();
     }
@@ -149,10 +149,14 @@ ColumnLayout {
     }
 
     function readinessText(): string {
-        const missing = zones.filter(zone => Number(status.profile?.[zone]?.count ?? 0) < 3);
-        if (missing.length === 0)
-            return qsTr("Calibration ready: all four zones have at least 3 samples.");
-        return qsTr("Calibration not ready: %1 still need at least 3 samples.").arg(missing.join(", "));
+        const missing = zones.filter(zone => Number(status.profile?.[zone]?.count ?? 0) < 5);
+        if (missing.length === 0) {
+            const quality = status.calibrationQuality;
+            if (quality && Number(quality.total ?? 0) > 0)
+                return qsTr("Location model ready · calibration check %1/%2 correct (%3%).").arg(quality.correct).arg(quality.total).arg(Math.round(Number(quality.accuracy ?? 0) * 100));
+            return qsTr("Location model ready. Six fingerprints per corner gives the best validation.");
+        }
+        return qsTr("Location model not ready: %1 still need at least 5 fingerprints.").arg(missing.join(", "));
     }
 
     function triggerText(): string {
@@ -205,7 +209,7 @@ ColumnLayout {
 
     Timer {
         id: refreshTimer
-        interval: root.status.testActive ? 100 : 700
+        interval: (root.status.testActive || (root.status.calibration && !root.status.calibration.complete)) ? 100 : 700
         repeat: true
         running: true
         onTriggered: root.refresh()
@@ -305,7 +309,7 @@ ColumnLayout {
         wrapMode: Text.WordWrap
         color: Colours.palette.m3outline
         font: Tokens.font.body.small
-        text: qsTr("Keep the laptop in its normal position. Pick a corner and tap once per prompt. Only feature vectors are stored — never raw audio.")
+        text: qsTr("Keep Mirai in the same position. Tap the selected corner once whenever it says TAP NOW. Six taps per corner train the v2 stereo fingerprint; raw audio is never stored.")
     }
 
     GridLayout {
@@ -325,12 +329,18 @@ ColumnLayout {
                 icon: root.zoneIcon(modelData)
                 text: {
                     const c = root.status.calibration;
-                    if (c && c.zone === modelData)
-                        return c.complete ? `${modelData} · ${c.have}/${c.need} ✓` : `${modelData} · tap ${c.have}/${c.need}`;
+                    if (c && c.zone === modelData) {
+                        if (c.complete)
+                            return `${modelData} · ${c.have}/${c.need} ✓`;
+                        return c.armed ? `${modelData} · TAP NOW · ${c.have}/${c.need}` : `${modelData} · get ready… · ${c.have}/${c.need}`;
+                    }
                     const count = root.status.profile?.[modelData]?.count ?? 0;
                     return count > 0 ? `${modelData} · ${count} samples` : `${modelData} · calibrate`;
                 }
-                type: IconTextButton.Tonal
+                type: {
+                    const c = root.status.calibration;
+                    return c && c.zone === modelData && c.armed ? IconTextButton.Filled : IconTextButton.Tonal;
+                }
                 shapeMorph: true
                 horizontalPadding: Tokens.padding.large
                 verticalPadding: Tokens.padding.medium
@@ -378,14 +388,14 @@ ColumnLayout {
 
                     StyledText {
                         Layout.fillWidth: true
-                        text: root.status.testActive ? qsTr("Listening for taps…") : qsTr("Classifier playground")
+                        text: root.status.testActive ? (root.status.testArmed ? qsTr("Tap now") : qsTr("Getting ready…")) : qsTr("Classifier playground")
                         font: Tokens.font.title.small
                         color: Colours.palette.m3onSurface
                     }
 
                     StyledText {
                         Layout.fillWidth: true
-                        text: root.status.testActive ? qsTr("Waiting for one new tap · actions disabled") : (root.status.testEvent ? qsTr("Result locked · press Test again to retry") : (root.status.profileReady ? qsTr("See what Tap Zones thinks you tapped") : qsTr("0/4 corners trained · train corners for location prediction")))
+                        text: root.status.testActive ? (root.status.testArmed ? qsTr("Waiting for one new tap · actions disabled") : qsTr("Waiting for quiet so the next sound cannot be a false tap")) : (root.status.testEvent ? qsTr("Result locked · press Test again to retry") : (root.status.profileReady ? qsTr("See what Tap Zones thinks you tapped") : qsTr("v2 location model needs fresh calibration · train all four corners")))
                         color: Colours.palette.m3outline
                         font: Tokens.font.label.small
                     }
@@ -554,7 +564,7 @@ ColumnLayout {
         wrapMode: Text.WordWrap
         color: Colours.palette.m3outline
         font: Tokens.font.body.small
-        text: root.status.running ? `${qsTr("Service running · microphone: %1 · accelerometer: %2").arg(root.status.audio ?? "unknown").arg(root.status.accel ?? "unknown")}\n${root.triggerText()}\n${root.readinessText()}` : `${qsTr("Service unavailable. Check the Tap Zones service.")}\n${root.readinessText()}`
+        text: root.status.running ? `${qsTr("Service running · microphone: %1 · accelerometer: %2").arg(root.status.audio ?? "unknown").arg(root.status.accel ?? "unknown")}\n${root.triggerText()}\n${root.status.triggerSource === "microphone" ? qsTr("Adaptive mic floor %1 · trigger RMS %2").arg(Number(root.status.noiseFloor ?? 0).toFixed(4)).arg(Number(root.status.tapRmsThreshold ?? 0).toFixed(4)) + "\n" : ""}${root.readinessText()}` : `${qsTr("Service unavailable. Check the Tap Zones service.")}\n${root.readinessText()}`
     }
 
     StepperRow {
