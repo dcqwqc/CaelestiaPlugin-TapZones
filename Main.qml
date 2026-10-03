@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import Caelestia.Plugins
+import dcqwqc.tapzones
 
 Item {
     id: root

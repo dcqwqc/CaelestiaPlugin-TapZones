@@ -8,6 +8,7 @@ import Quickshell.Io
 import Caelestia.Config
 import qs.components
 import qs.modules.nexus.common
+import dcqwqc.tapzones
 
 ColumnLayout {
     id: root
@@ -98,10 +99,10 @@ ColumnLayout {
         first: true
         text: qsTr("Tap Zones")
     }
-    SwitchRow {
+    ToggleRow {
         Layout.fillWidth: true
         first: true
-        label: qsTr("Enable detector")
+        text: qsTr("Enable detector")
         subtext: qsTr("Stays safely off until you calibrate all four zones.")
         checked: Boolean(root.settings?.enabled ?? false)
         onToggled: checked => {
