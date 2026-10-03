@@ -1,24 +1,113 @@
 pragma ComponentBehavior: Bound
 
 import QtQuick
-import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import Caelestia.Config
 import qs.components
+import qs.components.controls
 import qs.modules.nexus.common
 import dcqwqc.tapzones
 
 ColumnLayout {
     id: root
+
     property var settings: null
     property var status: ({})
     readonly property string helper: `${Quickshell.env("HOME")}/.local/share/caelestia/plugins/tapzones/scripts/tapzones`
     readonly property var zones: ["TL", "TR", "BL", "BR"]
     readonly property var actions: ["none", "volume_up", "volume_down", "media_toggle", "next", "previous", "quick_settings"]
+    readonly property var policies: [
+        {
+            value: "required",
+            label: qsTr("Required"),
+            icon: "sensors"
+        },
+        {
+            value: "preferred",
+            label: qsTr("Preferred"),
+            icon: "auto_awesome"
+        },
+        {
+            value: "off",
+            label: qsTr("Mic only"),
+            icon: "mic"
+        }
+    ]
+
     Layout.fillWidth: true
     spacing: Tokens.spacing.extraSmall
+
+    function zoneName(zone): string {
+        switch (zone) {
+        case "TL":
+            return qsTr("Top left");
+        case "TR":
+            return qsTr("Top right");
+        case "BL":
+            return qsTr("Bottom left");
+        case "BR":
+            return qsTr("Bottom right");
+        default:
+            return zone ?? "—";
+        }
+    }
+
+    function zoneIcon(zone): string {
+        switch (zone) {
+        case "TL":
+            return "north_west";
+        case "TR":
+            return "north_east";
+        case "BL":
+            return "south_west";
+        case "BR":
+            return "south_east";
+        default:
+            return "touch_app";
+        }
+    }
+
+    function prettyAction(action): string {
+        switch (action) {
+        case "none":
+            return qsTr("None");
+        case "volume_up":
+            return qsTr("Volume up");
+        case "volume_down":
+            return qsTr("Volume down");
+        case "media_toggle":
+            return qsTr("Play / pause");
+        case "next":
+            return qsTr("Next track");
+        case "previous":
+            return qsTr("Previous track");
+        case "quick_settings":
+            return qsTr("Quick Settings");
+        default:
+            return action;
+        }
+    }
+
+    function actionIcon(action): string {
+        switch (action) {
+        case "volume_up":
+            return "volume_up";
+        case "volume_down":
+            return "volume_down";
+        case "media_toggle":
+            return "play_pause";
+        case "next":
+            return "skip_next";
+        case "previous":
+            return "skip_previous";
+        case "quick_settings":
+            return "tune";
+        default:
+            return "remove";
+        }
+    }
 
     function actionMap(): var {
         try {
@@ -27,9 +116,11 @@ ColumnLayout {
             return {};
         }
     }
+
     function currentAction(zone, count): string {
         return String(actionMap()[zone]?.[String(count)] ?? "none");
     }
+
     function setAction(zone, count, value): void {
         if (!settings)
             return;
@@ -39,31 +130,52 @@ ColumnLayout {
         map[zone][String(count)] = value;
         settings.actionsJson = JSON.stringify(map);
     }
+
     function refresh(): void {
         if (!statusProcess.running)
             statusProcess.running = true;
     }
+
     function calibrate(zone): void {
         calibration.command = [helper, "calibrate", zone, "--count", String(settings?.calibrationCount ?? 12)];
         calibration.running = true;
         refreshTimer.restart();
     }
+
+    function toggleLiveTest(): void {
+        tester.command = status.testActive ? [helper, "test-stop"] : [helper, "test-start", "--seconds", "30"];
+        tester.running = true;
+        refreshTimer.restart();
+    }
+
     function readinessText(): string {
         const missing = zones.filter(zone => Number(status.profile?.[zone]?.count ?? 0) < 3);
         if (missing.length === 0)
             return qsTr("Calibration ready: all four zones have at least 3 samples.");
-        return qsTr("Calibration not ready: %1 still need at least 3 samples. Detection cannot fire yet.").arg(missing.join(", "));
+        return qsTr("Calibration not ready: %1 still need at least 3 samples.").arg(missing.join(", "));
     }
+
     function triggerText(): string {
         if (status.triggerSource === "microphone" && status.degraded)
-            return qsTr("Trigger: microphone-only fallback because accelerometer samples are unavailable. It uses a conservative transient gate; a reboot may restore accelerometer accuracy.");
+            return qsTr("Microphone fallback is active because the accelerometer is unavailable. A reboot may restore sensor-fusion accuracy.");
         if (status.triggerSource === "microphone")
-            return qsTr("Trigger: microphone-only by policy, using a conservative transient gate.");
+            return qsTr("Microphone-only trigger is active.");
         if (status.triggerSource === "accelerometer")
-            return qsTr("Trigger: accelerometer impulse.");
+            return qsTr("Accelerometer trigger is active.");
         if (status.degraded)
-            return qsTr("Trigger: unavailable; required accelerometer samples cannot be read. A reboot may restore accelerometer accuracy.");
-        return qsTr("Trigger: waiting for sensor samples.");
+            return qsTr("The required accelerometer is unavailable.");
+        return qsTr("Waiting for sensor samples.");
+    }
+
+    function testResultText(): string {
+        const event = status.testEvent;
+        if (!status.profileReady)
+            return qsTr("Finish the four-zone calibration first, then start the live test.");
+        if (!event)
+            return status.testActive ? qsTr("Armed. Tap the desk and I’ll show which zone the classifier thinks it was.") : qsTr("Start a 30-second test session. Actions are suppressed while testing.");
+        const pct = Math.round(Number(event.confidence ?? 0) * 100);
+        const source = event.triggerSource === "microphone" ? qsTr("microphone") : qsTr("accelerometer");
+        return event.accepted ? qsTr("%1 · %2% confidence · accepted · %3").arg(zoneName(event.zone)).arg(pct).arg(source) : qsTr("%1 · %2% confidence · below your %3% threshold · %4").arg(zoneName(event.zone)).arg(pct).arg(Math.round(Number(event.threshold ?? 0) * 100)).arg(source);
     }
 
     Process {
@@ -81,35 +193,53 @@ ColumnLayout {
             }
         }
     }
+
     Process {
         id: calibration
     }
     Process {
         id: tester
     }
+
     Timer {
         id: refreshTimer
-        interval: 700
+        interval: root.status.testActive ? 220 : 700
         repeat: true
         running: true
         onTriggered: root.refresh()
+    }
+
+    Component {
+        id: policyMenuItem
+        MenuItem {
+            required property string storedValue
+        }
+    }
+
+    Component {
+        id: actionMenuItem
+        MenuItem {
+            required property string storedValue
+        }
     }
 
     SectionHeader {
         first: true
         text: qsTr("Tap Zones")
     }
+
     ToggleRow {
         Layout.fillWidth: true
         first: true
         text: qsTr("Enable detector")
-        subtext: qsTr("Stays safely off until you calibrate all four zones.")
+        subtext: qsTr("Normal actions run only after all four zones are calibrated.")
         checked: Boolean(root.settings?.enabled ?? false)
         onToggled: checked => {
             if (root.settings)
                 root.settings.enabled = checked;
         }
     }
+
     StepperRow {
         Layout.fillWidth: true
         label: qsTr("Sensitivity")
@@ -120,35 +250,52 @@ ColumnLayout {
         value: Number(root.settings?.sensitivity ?? 55)
         onMoved: v => root.settings.sensitivity = Math.round(v)
     }
+
     StepperRow {
         Layout.fillWidth: true
         last: true
         label: qsTr("Confidence")
-        subtext: qsTr("Minimum classifier confidence")
+        subtext: qsTr("Minimum confidence required for normal actions")
         from: 50
         to: 95
         stepSize: 1
         value: Number(root.settings?.confidence ?? 72)
         onMoved: v => root.settings.confidence = Math.round(v)
     }
-    RowLayout {
+
+    Item {
+        id: policyPicker
         Layout.fillWidth: true
-        StyledText {
-            Layout.preferredWidth: 128
-            text: qsTr("Accelerometer")
-        }
-        ComboBox {
-            id: accelPolicy
-            Layout.fillWidth: true
-            model: ["required", "preferred", "off"]
-            Component.onCompleted: currentIndex = Math.max(0, model.indexOf(String(root.settings?.accelPolicy ?? "required")))
-            onActivated: index => root.settings.accelPolicy = model[index]
+        implicitHeight: policyRow.implicitHeight
+
+        readonly property var entries: root.policies.map(policy => policyMenuItem.createObject(policyPicker, {
+                text: policy.label,
+                icon: policy.icon,
+                storedValue: policy.value
+            }))
+
+        SelectRow {
+            id: policyRow
+            anchors.fill: parent
+            label: qsTr("Accelerometer")
+            subtext: qsTr("Preferred automatically falls back to the microphone when the sensor is unavailable.")
+            menuItems: policyPicker.entries
+            active: {
+                const value = String(root.settings?.accelPolicy ?? "preferred");
+                const index = root.policies.findIndex(policy => policy.value === value);
+                return policyPicker.entries[Math.max(0, index)] ?? null;
+            }
+            onSelected: item => {
+                if (root.settings)
+                    root.settings.accelPolicy = item.storedValue;
+            }
         }
     }
 
     SectionHeader {
         text: qsTr("Guided calibration")
     }
+
     StyledText {
         Layout.fillWidth: true
         Layout.leftMargin: Tokens.padding.small
@@ -156,28 +303,45 @@ ColumnLayout {
         wrapMode: Text.WordWrap
         color: Colours.palette.m3outline
         font: Tokens.font.body.small
-        text: qsTr("Place the laptop normally. Select a corner, then tap it once per prompt. The daemon stores only normalized features — never audio.")
+        text: qsTr("Keep the laptop in its normal position. Pick a corner and tap once per prompt. Only feature vectors are stored — never raw audio.")
     }
-    Repeater {
-        model: root.zones
-        Button {
-            required property string modelData
-            Layout.fillWidth: true
-            text: {
-                const c = root.status.calibration;
-                if (c && c.zone === modelData)
-                    return c.complete ? `${modelData} — complete (${c.have}/${c.need})` : `${modelData} — tap now (${c.have}/${c.need})`;
-                const count = root.status.profile?.[modelData]?.count ?? 0;
-                if (count < 3)
-                    return count ? `${modelData} — ${count}/3 minimum samples; continue calibration` : `${modelData} — start ${root.settings?.calibrationCount ?? 12} taps`;
-                return `${modelData} — ${count} samples; recalibrate`;
+
+    GridLayout {
+        Layout.fillWidth: true
+        columns: 2
+        columnSpacing: Tokens.spacing.small
+        rowSpacing: Tokens.spacing.small
+
+        Repeater {
+            model: root.zones
+
+            IconTextButton {
+                required property string modelData
+
+                Layout.fillWidth: true
+                Layout.preferredWidth: 1
+                icon: root.zoneIcon(modelData)
+                text: {
+                    const c = root.status.calibration;
+                    if (c && c.zone === modelData)
+                        return c.complete ? `${modelData} · ${c.have}/${c.need} ✓` : `${modelData} · tap ${c.have}/${c.need}`;
+                    const count = root.status.profile?.[modelData]?.count ?? 0;
+                    return count > 0 ? `${modelData} · ${count} samples` : `${modelData} · calibrate`;
+                }
+                type: IconTextButton.Tonal
+                shapeMorph: true
+                horizontalPadding: Tokens.padding.large
+                verticalPadding: Tokens.padding.medium
+                onClicked: root.calibrate(modelData)
             }
-            onClicked: root.calibrate(modelData)
         }
     }
-    Button {
-        Layout.fillWidth: true
-        text: qsTr("Reset every calibration profile")
+
+    IconTextButton {
+        Layout.alignment: Qt.AlignRight
+        icon: "restart_alt"
+        text: qsTr("Reset calibration")
+        type: IconTextButton.Text
         onClicked: {
             calibration.command = [root.helper, "reset"];
             calibration.running = true;
@@ -186,59 +350,202 @@ ColumnLayout {
     }
 
     SectionHeader {
+        text: qsTr("Live recognition test")
+    }
+
+    StyledRect {
+        Layout.fillWidth: true
+        implicitHeight: testLayout.implicitHeight + Tokens.padding.large * 2
+        radius: Tokens.rounding.extraLarge
+        color: Colours.tPalette.m3surfaceContainer
+
+        ColumnLayout {
+            id: testLayout
+
+            anchors.fill: parent
+            anchors.margins: Tokens.padding.large
+            spacing: Tokens.spacing.medium
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Tokens.spacing.medium
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 0
+
+                    StyledText {
+                        Layout.fillWidth: true
+                        text: root.status.testActive ? qsTr("Listening for taps…") : qsTr("Classifier playground")
+                        font: Tokens.font.title.small
+                        color: Colours.palette.m3onSurface
+                    }
+
+                    StyledText {
+                        Layout.fillWidth: true
+                        text: root.status.testActive ? qsTr("%1 seconds remaining · actions disabled").arg(Math.max(0, Math.ceil(Number(root.status.testRemainingMs ?? 0) / 1000))) : qsTr("See what Tap Zones thinks you tapped")
+                        color: Colours.palette.m3outline
+                        font: Tokens.font.label.small
+                    }
+                }
+
+                IconTextButton {
+                    icon: root.status.testActive ? "stop_circle" : "play_circle"
+                    text: root.status.testActive ? qsTr("Stop") : qsTr("Start test")
+                    type: root.status.testActive ? IconTextButton.Filled : IconTextButton.Tonal
+                    disabled: !root.status.profileReady
+                    onClicked: root.toggleLiveTest()
+                }
+            }
+
+            GridLayout {
+                Layout.fillWidth: true
+                columns: 2
+                columnSpacing: Tokens.spacing.small
+                rowSpacing: Tokens.spacing.small
+
+                Repeater {
+                    model: root.zones
+
+                    StyledRect {
+                        required property string modelData
+
+                        readonly property bool selected: root.status.testEvent?.zone === modelData
+
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 1
+                        implicitHeight: 62
+                        radius: Tokens.rounding.large
+                        color: selected ? (root.status.testEvent?.accepted ? Colours.palette.m3primaryContainer : Colours.palette.m3secondaryContainer) : Colours.tPalette.m3surfaceContainerHighest
+                        border.width: selected ? 1 : 0
+                        border.color: selected ? Colours.palette.m3primary : "transparent"
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.margins: Tokens.padding.medium
+                            spacing: Tokens.spacing.small
+
+                            MaterialIcon {
+                                text: root.zoneIcon(parent.parent.modelData)
+                                color: parent.parent.selected ? Colours.palette.m3primary : Colours.palette.m3onSurfaceVariant
+                                fontStyle: Tokens.font.icon.medium
+                                fill: parent.parent.selected ? 1 : 0
+                            }
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 0
+
+                                StyledText {
+                                    text: root.zoneName(parent.parent.parent.modelData)
+                                    color: Colours.palette.m3onSurface
+                                    font: Tokens.font.body.small
+                                }
+
+                                StyledText {
+                                    visible: parent.parent.parent.selected
+                                    text: qsTr("%1%").arg(Math.round(Number(root.status.testEvent?.confidence ?? 0) * 100))
+                                    color: Colours.palette.m3primary
+                                    font: Tokens.font.label.small
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            StyledText {
+                Layout.fillWidth: true
+                text: root.testResultText()
+                wrapMode: Text.WordWrap
+                color: root.status.testEvent?.accepted ? Colours.palette.m3primary : Colours.palette.m3onSurfaceVariant
+                font: Tokens.font.body.small
+            }
+        }
+    }
+
+    SectionHeader {
         text: qsTr("Actions")
     }
+
     Repeater {
         model: root.zones
+
         ColumnLayout {
             id: zoneRow
             required property string modelData
+
             Layout.fillWidth: true
+            spacing: Tokens.spacing.extraSmall
+
             StyledText {
-                text: modelData
+                Layout.topMargin: Tokens.spacing.small
+                text: root.zoneName(zoneRow.modelData)
                 font: Tokens.font.title.small
                 color: Colours.palette.m3onSurface
             }
+
             Repeater {
                 model: [1, 2, 3]
-                RowLayout {
-                    id: tapRow
+
+                Item {
+                    id: actionPicker
                     required property int modelData
+
                     Layout.fillWidth: true
-                    StyledText {
-                        Layout.preferredWidth: 86
-                        text: modelData === 1 ? qsTr("Single tap") : modelData === 2 ? qsTr("Double tap") : qsTr("Triple tap")
-                    }
-                    ComboBox {
-                        Layout.fillWidth: true
-                        model: root.actions
-                        Component.onCompleted: currentIndex = Math.max(0, root.actions.indexOf(root.currentAction(zoneRow.modelData, tapRow.modelData)))
-                        onActivated: index => root.setAction(zoneRow.modelData, tapRow.modelData, root.actions[index])
-                    }
-                    Button {
-                        text: qsTr("Test")
-                        onClicked: {
-                            tester.command = [root.helper, "action-test", root.currentAction(zoneRow.modelData, tapRow.modelData)];
-                            tester.running = true;
+                    implicitHeight: actionRow.implicitHeight
+
+                    readonly property string actionValue: root.currentAction(zoneRow.modelData, actionPicker.modelData)
+                    readonly property var entries: root.actions.map(action => actionMenuItem.createObject(actionPicker, {
+                            text: root.prettyAction(action),
+                            icon: root.actionIcon(action),
+                            storedValue: action
+                        }))
+
+                    RowLayout {
+                        id: actionRow
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        spacing: Tokens.spacing.small
+
+                        StyledText {
+                            Layout.preferredWidth: 92
+                            text: actionPicker.modelData === 1 ? qsTr("Single tap") : actionPicker.modelData === 2 ? qsTr("Double tap") : qsTr("Triple tap")
+                            color: Colours.palette.m3onSurfaceVariant
+                            font: Tokens.font.body.small
+                        }
+
+                        SplitButton {
+                            Layout.fillWidth: true
+                            type: SplitButton.Tonal
+                            menuItems: actionPicker.entries
+                            active: {
+                                const index = root.actions.indexOf(actionPicker.actionValue);
+                                return actionPicker.entries[Math.max(0, index)] ?? null;
+                            }
+                            stateLayer.onClicked: expanded = !expanded
+                            menu.onItemSelected: item => root.setAction(zoneRow.modelData, actionPicker.modelData, item.storedValue)
+                        }
+
+                        IconTextButton {
+                            icon: "play_arrow"
+                            text: qsTr("Test")
+                            type: IconTextButton.Text
+                            onClicked: {
+                                tester.command = [root.helper, "action-test", actionPicker.actionValue];
+                                tester.running = true;
+                            }
                         }
                     }
                 }
             }
         }
     }
-    StyledText {
-        Layout.fillWidth: true
-        Layout.leftMargin: Tokens.padding.small
-        Layout.rightMargin: Tokens.padding.small
-        wrapMode: Text.WordWrap
-        color: Colours.palette.m3outline
-        font: Tokens.font.body.small
-        text: qsTr("Quick Settings is shown only as a safe unavailable placeholder because this Caelestia install exposes no stable IPC action. Custom commands are intentionally not authored in the UI; use a JSON argv list in the local config if needed.")
-    }
 
     SectionHeader {
         text: qsTr("Diagnostics")
     }
+
     StyledText {
         Layout.fillWidth: true
         Layout.leftMargin: Tokens.padding.small
@@ -246,8 +553,9 @@ ColumnLayout {
         wrapMode: Text.WordWrap
         color: Colours.palette.m3outline
         font: Tokens.font.body.small
-        text: root.status.running ? `${qsTr("Service running · microphone: %1 · accelerometer: %2").arg(root.status.audio ?? "unknown").arg(root.status.accel ?? "unknown")}\n${root.triggerText()}\n${root.readinessText()}` : `${qsTr("Service unavailable. Run install.sh install and check systemctl --user status tapzones.")}\n${root.readinessText()}`
+        text: root.status.running ? `${qsTr("Service running · microphone: %1 · accelerometer: %2").arg(root.status.audio ?? "unknown").arg(root.status.accel ?? "unknown")}\n${root.triggerText()}\n${root.readinessText()}` : `${qsTr("Service unavailable. Check the Tap Zones service.")}\n${root.readinessText()}`
     }
+
     StepperRow {
         Layout.fillWidth: true
         label: qsTr("Cooldown")
@@ -258,6 +566,7 @@ ColumnLayout {
         value: Number(root.settings?.cooldownMs ?? 700)
         onMoved: v => root.settings.cooldownMs = Math.round(v)
     }
+
     StepperRow {
         Layout.fillWidth: true
         last: true

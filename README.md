@@ -57,3 +57,7 @@ rm -rf ~/.local/state/tapzones ~/.config/tapzones
 ```
 
 The second command removes only saved feature profiles/configuration; it does not and cannot remove audio because the plugin never saves any.
+
+### Live recognition test
+
+The plugin settings include a 30-second classifier playground. After all four zones have at least three calibration samples, start the test and tap freely: the UI highlights the predicted TL/TR/BL/BR zone, shows confidence and trigger source, and tells you whether the result clears the configured confidence threshold. Normal mapped actions are suppressed for the whole test session.
