@@ -142,30 +142,6 @@ ColumnLayout {
         refreshTimer.restart();
     }
 
-    function startEnhancedCalibration(): void {
-        calibration.command = [helper, "calibrate-enhanced"];
-        calibration.running = true;
-        refreshTimer.restart();
-    }
-
-    function resetEnhancedCalibration(): void {
-        calibration.command = [helper, "reset-enhanced"];
-        calibration.running = true;
-        refreshTimer.restart();
-    }
-
-    function enhancedCalibrationText(): string {
-        const c = status.calibration;
-        if (c && c.mode === "enhanced-auto" && !c.complete) {
-            const counts = c.counts ?? {};
-            return qsTr("Tap %1 now · TL %2 · TR %3 · BL %4 · BR %5 · rejected %6").arg(zoneName(c.zone)).arg(counts.TL ?? 0).arg(counts.TR ?? 0).arg(counts.BL ?? 0).arg(counts.BR ?? 0).arg(c.rejected ?? 0);
-        }
-        const quality = status.enhancedQuality;
-        if (quality && Number(quality.total ?? 0) > 0)
-            return qsTr("v3 validation %1/%2 (%3%) · left/right %4% · top/bottom %5%").arg(quality.correct).arg(quality.total).arg(Math.round(Number(quality.accuracy ?? 0) * 100)).arg(Math.round(Number(quality.lrAccuracy ?? 0) * 100)).arg(Math.round(Number(quality.tbAccuracy ?? 0) * 100));
-        return qsTr("v3 not calibrated yet. The current v2 model stays active until v3 proves it is at least as reliable.");
-    }
-
     function toggleLiveTest(): void {
         tester.command = status.testActive ? [helper, "test-stop"] : [helper, "test-start"];
         tester.running = true;
@@ -321,115 +297,7 @@ ColumnLayout {
     }
 
     SectionHeader {
-        text: qsTr("Best calibration")
-    }
-
-    StyledRect {
-        Layout.fillWidth: true
-        implicitHeight: bestCalibrationLayout.implicitHeight + Tokens.padding.large * 2
-        radius: Tokens.rounding.extraLarge
-        color: Colours.tPalette.m3surfaceContainer
-
-        ColumnLayout {
-            id: bestCalibrationLayout
-            anchors.fill: parent
-            anchors.margins: Tokens.padding.large
-            spacing: Tokens.spacing.medium
-
-            StyledText {
-                Layout.fillWidth: true
-                text: qsTr("Research v3 · dispersion + axis fusion")
-                color: Colours.palette.m3onSurface
-                font: Tokens.font.label.large
-            }
-
-            StyledText {
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-                color: Colours.palette.m3outline
-                font: Tokens.font.body.small
-                text: qsTr("This calibration alternates corners instead of training one corner at a time. It measures frequency-specific arrival times, stereo delay, spectral envelope and impact decay. Bad/clipped/noisy taps are rejected automatically. The current v2 model remains active unless v3 validates at least as well.")
-            }
-
-            IconTextButton {
-                Layout.fillWidth: true
-                icon: root.status.calibration?.mode === "enhanced-auto" && !root.status.calibration?.complete ? "hearing" : "model_training"
-                text: {
-                    const c = root.status.calibration;
-                    if (c && c.mode === "enhanced-auto" && !c.complete)
-                        return c.armed ? qsTr("TAP %1 NOW").arg(root.zoneName(c.zone)) : qsTr("Get ready · next: %1").arg(root.zoneName(c.zone));
-                    return root.status.enhancedProfileReady ? qsTr("Recalibrate research v3") : qsTr("Start best calibration");
-                }
-                type: root.status.calibration?.mode === "enhanced-auto" && root.status.calibration?.armed ? IconTextButton.Filled : IconTextButton.Tonal
-                shapeMorph: true
-                verticalPadding: Tokens.padding.large
-                onClicked: {
-                    const c = root.status.calibration;
-                    if (!(c && c.mode === "enhanced-auto" && !c.complete))
-                        root.startEnhancedCalibration();
-                }
-            }
-
-            GridLayout {
-                Layout.fillWidth: true
-                columns: 2
-                columnSpacing: Tokens.spacing.small
-                rowSpacing: Tokens.spacing.small
-
-                Repeater {
-                    model: root.zones
-
-                    StyledRect {
-                        required property string modelData
-                        Layout.fillWidth: true
-                        Layout.preferredWidth: 1
-                        implicitHeight: zoneLabel.implicitHeight + Tokens.padding.medium * 2
-                        radius: Tokens.rounding.large
-                        color: {
-                            const c = root.status.calibration;
-                            return c && c.mode === "enhanced-auto" && c.zone === modelData && c.armed ? Colours.palette.m3primaryContainer : Colours.tPalette.m3surfaceContainerHigh;
-                        }
-
-                        StyledText {
-                            id: zoneLabel
-                            anchors.centerIn: parent
-                            text: {
-                                const c = root.status.calibration;
-                                const liveCount = c && c.mode === "enhanced-auto" ? Number(c.counts?.[modelData] ?? 0) : Number(root.status.enhancedProfile?.[modelData]?.count ?? 0);
-                                return `${root.zoneName(modelData)} · ${liveCount}`;
-                            }
-                            color: Colours.palette.m3onSurface
-                            font: Tokens.font.label.medium
-                        }
-                    }
-                }
-            }
-
-            StyledText {
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-                text: root.enhancedCalibrationText()
-                color: Colours.palette.m3outline
-                font: Tokens.font.body.small
-            }
-
-            StyledText {
-                Layout.fillWidth: true
-                visible: Boolean(root.status.lastCalibrationReject)
-                wrapMode: Text.WordWrap
-                text: qsTr("Last tap ignored: %1 · just tap the requested corner again.").arg(root.status.lastCalibrationReject ?? "")
-                color: Colours.palette.m3error
-                font: Tokens.font.body.small
-            }
-
-            IconTextButton {
-                Layout.fillWidth: true
-                icon: "restart_alt"
-                text: qsTr("Reset research v3 calibration")
-                type: IconTextButton.Text
-                onClicked: root.resetEnhancedCalibration()
-            }
-        }
+        text: qsTr("Calibration")
     }
 
     StyledText {
@@ -439,7 +307,91 @@ ColumnLayout {
         wrapMode: Text.WordWrap
         color: Colours.palette.m3outline
         font: Tokens.font.body.small
-        text: qsTr("Fallback model remains available: %1").arg(root.status.calibrationQuality ? `${Math.round(Number(root.status.calibrationQuality.accuracy ?? 0) * 100)}% validation` : qsTr("not calibrated"))
+        text: qsTr("Recommended model: v2-axis. It currently validates better on Mirai than the experimental dispersion model. Calibrate each corner with six taps, using a natural mix of light and firm taps.")
+    }
+
+    GridLayout {
+        Layout.fillWidth: true
+        columns: 2
+        columnSpacing: Tokens.spacing.small
+        rowSpacing: Tokens.spacing.small
+
+        Repeater {
+            model: root.zones
+
+            IconTextButton {
+                required property string modelData
+
+                Layout.fillWidth: true
+                Layout.preferredWidth: 1
+                icon: root.zoneIcon(modelData)
+                text: {
+                    const c = root.status.calibration;
+                    if (c && c.mode !== "enhanced-auto" && c.zone === modelData) {
+                        if (c.complete)
+                            return `${modelData} · ${c.have}/${c.need} ✓`;
+                        return c.armed ? `${modelData} · TAP NOW · ${c.have}/${c.need}` : `${modelData} · get ready… · ${c.have}/${c.need}`;
+                    }
+                    const count = root.status.profile?.[modelData]?.count ?? 0;
+                    return count > 0 ? `${modelData} · ${count} samples` : `${modelData} · calibrate`;
+                }
+                type: {
+                    const c = root.status.calibration;
+                    return c && c.mode !== "enhanced-auto" && c.zone === modelData && c.armed ? IconTextButton.Filled : IconTextButton.Tonal;
+                }
+                shapeMorph: true
+                horizontalPadding: Tokens.padding.large
+                verticalPadding: Tokens.padding.medium
+                onClicked: root.calibrate(modelData)
+            }
+        }
+    }
+
+    IconTextButton {
+        Layout.alignment: Qt.AlignRight
+        icon: "restart_alt"
+        text: qsTr("Reset calibration")
+        type: IconTextButton.Text
+        onClicked: {
+            calibration.command = [root.helper, "reset"];
+            calibration.running = true;
+            root.refresh();
+        }
+    }
+
+    StyledRect {
+        Layout.fillWidth: true
+        implicitHeight: researchResultLayout.implicitHeight + Tokens.padding.large * 2
+        radius: Tokens.rounding.extraLarge
+        color: Colours.tPalette.m3surfaceContainer
+
+        ColumnLayout {
+            id: researchResultLayout
+            anchors.fill: parent
+            anchors.margins: Tokens.padding.large
+            spacing: Tokens.spacing.small
+
+            StyledText {
+                Layout.fillWidth: true
+                text: qsTr("Experimental localization research")
+                color: Colours.palette.m3onSurface
+                font: Tokens.font.label.large
+            }
+
+            StyledText {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                color: Colours.palette.m3outline
+                font: Tokens.font.body.small
+                text: {
+                    const v2 = Number(root.status.calibrationQuality?.accuracy ?? 0);
+                    const v3 = Number(root.status.enhancedQuality?.accuracy ?? 0);
+                    if (v3 > 0)
+                        return qsTr("Dispersion v3 measured %1% on the interleaved dataset versus %2% for the current v2 validation, so it is not used. Its samples are kept for research only.").arg(Math.round(v3 * 100)).arg(Math.round(v2 * 100));
+                    return qsTr("No experimental model is active. The validated v2-axis model remains the runtime classifier.");
+                }
+            }
+        }
     }
 
     SectionHeader {

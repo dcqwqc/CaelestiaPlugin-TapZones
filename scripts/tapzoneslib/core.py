@@ -456,11 +456,20 @@ def capture_quality(pcm, rate=48000):
 
     if clipped > 0.02:
         return {"ok": False, "reason": "clipped", "snrDb": snr_db, "bands": occupied}
-    if snr_db < 7.0:
+    # The onset detector has already established that this is an impact.
+    # Calibration should learn natural tap-force/angle variation instead of
+    # discarding it. Only captures buried almost completely in noise are
+    # rejected; narrow-band coverage is diagnostic, not a hard failure.
+    if snr_db < 2.0:
         return {"ok": False, "reason": "too-noisy", "snrDb": snr_db, "bands": occupied}
-    if occupied < 3:
-        return {"ok": False, "reason": "not-broadband", "snrDb": snr_db, "bands": occupied}
-    return {"ok": True, "reason": None, "snrDb": snr_db, "bands": occupied, "peak": peak}
+    return {
+        "ok": True,
+        "reason": None,
+        "snrDb": snr_db,
+        "bands": occupied,
+        "peak": peak,
+        "lowBandCoverage": occupied < 3,
+    }
 
 
 def feature_vector(audio, accel, impulse):

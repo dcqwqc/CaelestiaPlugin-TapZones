@@ -81,6 +81,21 @@ class CoreTests(unittest.TestCase):
             np.linalg.norm(near[:30] - far[:30]),
         )
 
+    def test_capture_quality_keeps_valid_narrowband_impact(self):
+        rate = 48000
+        n = 5760
+        pcm = np.zeros((n, 2), dtype=float)
+        start = int(rate * 0.045)
+        k = np.arange(n - start)
+        tone = 0.09 * np.sin(2*np.pi*1800*k/rate) * np.exp(-k/(rate*0.012))
+        pcm[start:, 0] = tone
+        pcm[start:, 1] = tone * 0.85
+        pcm = np.clip(pcm * 32768, -32768, 32767).astype("<i2")
+        quality = capture_quality(pcm)
+        self.assertTrue(quality["ok"])
+        self.assertTrue(quality["lowBandCoverage"])
+        self.assertEqual(quality["bands"], 1)
+
     def test_enhanced_classifier_needs_eight_samples_per_corner(self):
         classifier = EnhancedClassifier({})
         sample = np.zeros(ENHANCED_SIGNATURE_SIZE)

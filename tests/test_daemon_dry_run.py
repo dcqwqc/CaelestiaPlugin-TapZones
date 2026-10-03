@@ -225,6 +225,17 @@ class DaemonV2Tests(unittest.TestCase):
         self.assertEqual(daemon.status["calibration"]["rejected"], 1)
         self.assertEqual(daemon.status["lastCalibrationReject"], "too-noisy")
 
+    def test_enhanced_resume_sequence_keeps_saved_progress(self):
+        daemon = Daemon.__new__(Daemon)
+        counts = {"TL": 9, "TR": 10, "BL": 9, "BR": 9}
+        remaining = daemon._remaining_enhanced_sequence(counts)
+        self.assertEqual(len(remaining), 11)
+        self.assertEqual(remaining[0], "BL")
+        self.assertEqual(remaining.count("TL"), 3)
+        self.assertEqual(remaining.count("TR"), 2)
+        self.assertEqual(remaining.count("BL"), 3)
+        self.assertEqual(remaining.count("BR"), 3)
+
     def test_enhanced_sequence_is_balanced_and_interleaved(self):
         sequence = Daemon._enhanced_sequence(8)
         self.assertEqual(len(sequence), 32)

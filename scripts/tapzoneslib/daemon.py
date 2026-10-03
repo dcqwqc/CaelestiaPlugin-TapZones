@@ -141,27 +141,48 @@ class Daemon:
             sequence.extend(patterns[index % len(patterns)])
         return sequence
 
+    def _remaining_enhanced_sequence(self, counts):
+        seen = {zone: 0 for zone in ("TL", "TR", "BL", "BR")}
+        remaining = []
+        for zone in self._enhanced_sequence():
+            seen[zone] += 1
+            if seen[zone] > int(counts.get(zone, 0)):
+                remaining.append(zone)
+        return remaining
+
     def _start_enhanced_calibration(self, now):
-        self.enhanced_classifier.samples = {}
-        self.enhanced_classifier._axis_cache = None
-        save_enhanced_classifier(self.enhanced_classifier)
-        self.refresh_enhanced_status()
+        counts = {
+            zone: len(self.enhanced_classifier.samples.get(zone, []))
+            for zone in ("TL", "TR", "BL", "BR")
+        }
+        # Resume a partial research calibration instead of throwing away good
+        # physical taps after a daemon/UI reload. Use Reset v3 explicitly when
+        # a completely fresh dataset is desired.
+        if all(count >= ENHANCED_MAX_SAMPLES for count in counts.values()):
+            self.enhanced_classifier.samples = {}
+            self.enhanced_classifier._axis_cache = None
+            save_enhanced_classifier(self.enhanced_classifier)
+            counts = {zone: 0 for zone in ("TL", "TR", "BL", "BR")}
+            self.refresh_enhanced_status()
+
         self.drain_audio()
         self.audio_detector.reset(require_quiet=True)
         self.calibration_armed_at = now + 0.35
-        sequence = self._enhanced_sequence()
+        sequence = self._remaining_enhanced_sequence(counts)
         self.status["lastCalibrationReject"] = None
         self.status["calibration"] = {
             "mode": "enhanced-auto",
-            "zone": sequence[0],
+            "zone": sequence[0] if sequence else None,
             "sequence": sequence,
             "step": 0,
             "minimumTotal": ENHANCED_TARGET_SAMPLES * 4,
             "maxTotal": ENHANCED_MAX_SAMPLES * 4,
-            "counts": {zone: 0 for zone in ("TL","TR","BL","BR")},
+            "counts": counts,
             "rejected": 0,
+            "rejectReasons": {},
+            "resumed": any(counts.values()),
             "armed": False,
-            "complete": False,
+            "complete": not bool(sequence),
         }
         self.status["testActive"] = False
         self.status["testEvent"] = None
@@ -174,9 +195,8 @@ class Daemon:
         calibration["step"] += 1
         counts = calibration["counts"]
         min_count = min(counts.values())
-        round_complete = calibration["step"] % 4 == 0
 
-        if round_complete and min_count >= ENHANCED_TARGET_SAMPLES:
+        if min_count >= ENHANCED_TARGET_SAMPLES:
             self.refresh_enhanced_status()
             quality = self.status.get("enhancedQuality") or {}
             accuracy = float(quality.get("accuracy", 0.0) or 0.0)
@@ -452,6 +472,8 @@ class Daemon:
             if enhanced_signature is None or not quality.get("ok"):
                 calibration["rejected"] = int(calibration.get("rejected", 0)) + 1
                 reason = quality.get("reason") if quality else "fingerprint-failed"
+                reasons = calibration.setdefault("rejectReasons", {})
+                reasons[reason] = int(reasons.get(reason, 0)) + 1
                 self.status["lastCalibrationReject"] = reason
                 calibration["lastReject"] = reason
                 self.audio_detector.reset(require_quiet=True)
@@ -459,14 +481,6 @@ class Daemon:
                 return
 
             zone = calibration["zone"]
-            if self.enhanced_classifier.sample_is_outlier(zone, enhanced_signature):
-                calibration["rejected"] = int(calibration.get("rejected", 0)) + 1
-                self.status["lastCalibrationReject"] = "outlier"
-                calibration["lastReject"] = "outlier"
-                self.audio_detector.reset(require_quiet=True)
-                self.calibration_armed_at = time.monotonic() + 0.30
-                return
-
             self.enhanced_classifier.add(zone, enhanced_signature)
             calibration["counts"][zone] = int(calibration["counts"].get(zone, 0)) + 1
             calibration["lastQuality"] = quality
