@@ -62,7 +62,7 @@ The second command removes only saved feature profiles/configuration; it does no
 
 ### Live recognition test
 
-The plugin settings include a one-shot classifier playground. Press Test, tap once, and the result freezes after the short stereo fingerprint window completes; press Test again for the next sample. With trained zones the UI highlights the predicted TL/TR/BL/BR zone, confidence and trigger source. With no trained zones it reports that the tap was detected but does not invent a location. Normal mapped actions are always suppressed during the test.
+The plugin settings include a continuous live classifier playground. Press **Start Live Test** once, then tap TL/TR/BL/BR repeatedly without restarting the test. Each new physical tap immediately replaces the previous prediction, shows its confidence percentage, and highlights the predicted corner with the Caelestia success-green state. The detector automatically re-arms after a brief quiet release while normal mapped actions remain suppressed. Press **Stop Test** only when you are finished.
 ### Adaptive tap detection
 
 When the accelerometer is unavailable, Tap Zones uses a stateful microphone detector rather than a fixed loudness threshold. It learns the local noise floor from quiet 20 ms windows, requires a fast RMS + peak onset, emits once per rising edge, and will not re-arm until the impact has released. Calibration also waits for quiet after the button press before it accepts a sample, so the UI click/handling noise cannot become the corner sample.

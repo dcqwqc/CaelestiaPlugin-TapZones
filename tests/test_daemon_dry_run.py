@@ -57,6 +57,7 @@ class DaemonV2Tests(unittest.TestCase):
         daemon.pending = []
         daemon.last_accept = 0.0
         daemon.test_serial = 0
+        daemon.audio_detector = Mock()
         daemon.fingerprint_capture = {
             "mode": mode,
             "frames": [np.zeros((960, 2), dtype="<i2")] * 5,
@@ -104,7 +105,7 @@ class DaemonV2Tests(unittest.TestCase):
         np.testing.assert_allclose(classifier.add.call_args.args[1], signature)
         self.assertEqual(daemon.status["calibration"]["have"], 1)
 
-    def test_live_test_classifies_completed_fingerprint_without_action(self):
+    def test_live_test_stays_active_and_accepts_consecutive_taps(self):
         classifier = Mock()
         classifier.profile.return_value = {
             zone: {"count": 6} for zone in ("TL", "TR", "BL", "BR")
@@ -115,8 +116,19 @@ class DaemonV2Tests(unittest.TestCase):
             "correct": 22,
             "total": 24,
         }
-        classifier.classify.return_value = ("BR", 0.86)
+        classifier.classify.side_effect = [("BR", 0.86), ("TL", 0.79)]
         daemon = self._daemon_for_finish(classifier, "test")
+
+        def capture():
+            return {
+                "mode": "test",
+                "frames": [np.zeros((960, 2), dtype="<i2")] * 5,
+                "source": "microphone",
+                "degraded": True,
+                "impulse": 0.0,
+                "audioRms": 0.03,
+                "postFrames": 3,
+            }
 
         with patch(
             "tapzoneslib.daemon.location_signature",
@@ -124,15 +136,48 @@ class DaemonV2Tests(unittest.TestCase):
         ), patch("tapzoneslib.daemon.run_action") as action:
             daemon._finish_fingerprint_capture({"confidence": 72})
 
+            self.assertEqual(daemon.status["testEvent"]["zone"], "BR")
+            self.assertEqual(daemon.status["testEvent"]["serial"], 1)
+            self.assertTrue(daemon.status["testActive"])
+            self.assertFalse(daemon.status["testArmed"])
+            self.assertTrue(daemon.status["testEvent"]["accepted"])
+
+            daemon.fingerprint_capture = capture()
+            daemon._finish_fingerprint_capture({"confidence": 72})
+
         action.assert_not_called()
-        classifier.classify.assert_called_once()
-        self.assertEqual(daemon.status["testEvent"]["zone"], "BR")
+        self.assertEqual(classifier.classify.call_count, 2)
+        self.assertEqual(daemon.status["testEvent"]["zone"], "TL")
+        self.assertEqual(daemon.status["testEvent"]["serial"], 2)
+        self.assertEqual(daemon.status["testEvent"]["fingerprintVersion"], 2)
+        self.assertTrue(daemon.status["testActive"])
+        self.assertFalse(daemon.status["testArmed"])
         self.assertTrue(daemon.status["testEvent"]["accepted"])
+        self.assertGreaterEqual(daemon.audio_detector.reset.call_count, 2)
+
+    def test_failed_live_test_capture_rearms_instead_of_stopping(self):
+        classifier = Mock()
+        classifier.profile.return_value = {
+            zone: {"count": 6} for zone in ("TL", "TR", "BL", "BR")
+        }
+        classifier.profile_ready.return_value = True
+        daemon = self._daemon_for_finish(classifier, "test")
+
+        with patch(
+            "tapzoneslib.daemon.location_signature",
+            return_value=None,
+        ):
+            daemon._finish_fingerprint_capture({"confidence": 72})
+
+        self.assertTrue(daemon.status["testActive"])
+        self.assertFalse(daemon.status["testArmed"])
         self.assertEqual(
-            daemon.status["testEvent"]["fingerprintVersion"],
-            2,
+            daemon.status["testEvent"]["reason"],
+            "fingerprint-failed",
         )
-        self.assertFalse(daemon.status["testActive"])
+        daemon.audio_detector.reset.assert_called_once_with(
+            require_quiet=True
+        )
 
     def test_enhanced_calibration_stores_only_good_v3_sample(self):
         legacy = Mock()

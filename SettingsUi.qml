@@ -171,7 +171,7 @@ ColumnLayout {
     function testResultText(): string {
         const event = status.testEvent;
         if (!event)
-            return status.testActive ? qsTr("Armed. Tap once — the result freezes immediately.") : qsTr("Press Test, tap once, then press Test again for another try. Actions stay disabled during the test.");
+            return status.testActive ? qsTr("Live test active · tap any corner. Results update continuously.") : qsTr("Start Live Test once, then tap corners continuously. Actions stay disabled during the test.");
         const source = event.triggerSource === "microphone" ? qsTr("microphone") : qsTr("accelerometer");
         const trained = Number(event.trainedZones?.length ?? 0);
         if (!event.zone)
@@ -421,22 +421,22 @@ ColumnLayout {
 
                     StyledText {
                         Layout.fillWidth: true
-                        text: root.status.testActive ? (root.status.testArmed ? qsTr("Tap now") : qsTr("Getting ready…")) : qsTr("Classifier playground")
+                        text: root.status.testActive ? (root.status.testArmed ? qsTr("Live test · tap any corner") : qsTr("Live test · re-arming…")) : qsTr("Classifier playground")
                         font: Tokens.font.title.small
                         color: Colours.palette.m3onSurface
                     }
 
                     StyledText {
                         Layout.fillWidth: true
-                        text: root.status.testActive ? (root.status.testArmed ? qsTr("Waiting for one new tap · actions disabled") : qsTr("Waiting for quiet so the next sound cannot be a false tap")) : (root.status.testEvent ? qsTr("Result locked · press Test again to retry") : (root.status.profileReady ? qsTr("See what Tap Zones thinks you tapped") : qsTr("v2 location model needs fresh calibration · train all four corners")))
+                        text: root.status.testActive ? (root.status.testArmed ? qsTr("Tap TL, TR, BL or BR · each new tap replaces the result automatically") : (root.status.testEvent ? qsTr("Last result stays visible · waiting briefly for quiet before the next tap") : qsTr("Waiting for quiet so the first sound cannot be a false tap"))) : (root.status.testEvent ? qsTr("Last live-test result") : (root.status.profileReady ? qsTr("See what Tap Zones thinks you tapped") : qsTr("v2 location model needs fresh calibration · train all four corners")))
                         color: Colours.palette.m3outline
                         font: Tokens.font.label.small
                     }
                 }
 
                 IconTextButton {
-                    icon: root.status.testActive ? "stop_circle" : (root.status.testEvent ? "restart_alt" : "play_circle")
-                    text: root.status.testActive ? qsTr("Stop") : (root.status.testEvent ? qsTr("Test again") : qsTr("Test"))
+                    icon: root.status.testActive ? "stop_circle" : "play_circle"
+                    text: root.status.testActive ? qsTr("Stop Test") : qsTr("Start Live Test")
                     type: root.status.testActive ? IconTextButton.Filled : IconTextButton.Tonal
                     onClicked: root.toggleLiveTest()
                 }
@@ -460,9 +460,9 @@ ColumnLayout {
                         Layout.preferredWidth: 1
                         implicitHeight: 62
                         radius: Tokens.rounding.large
-                        color: selected ? (root.status.testEvent?.accepted ? Colours.palette.m3primaryContainer : Colours.palette.m3secondaryContainer) : Colours.tPalette.m3surfaceContainerHighest
-                        border.width: selected ? 1 : 0
-                        border.color: selected ? Colours.palette.m3primary : "transparent"
+                        color: selected ? Colours.palette.m3successContainer : Colours.tPalette.m3surfaceContainerHighest
+                        border.width: selected ? 2 : 0
+                        border.color: selected ? Colours.palette.m3success : "transparent"
 
                         RowLayout {
                             anchors.fill: parent
@@ -471,7 +471,7 @@ ColumnLayout {
 
                             MaterialIcon {
                                 text: root.zoneIcon(parent.parent.modelData)
-                                color: parent.parent.selected ? Colours.palette.m3primary : Colours.palette.m3onSurfaceVariant
+                                color: parent.parent.selected ? Colours.palette.m3success : Colours.palette.m3onSurfaceVariant
                                 fontStyle: Tokens.font.icon.medium
                                 fill: parent.parent.selected ? 1 : 0
                             }
@@ -482,14 +482,14 @@ ColumnLayout {
 
                                 StyledText {
                                     text: root.zoneName(parent.parent.parent.modelData)
-                                    color: Colours.palette.m3onSurface
+                                    color: parent.parent.parent.selected ? Colours.palette.m3onSuccessContainer : Colours.palette.m3onSurface
                                     font: Tokens.font.body.small
                                 }
 
                                 StyledText {
                                     visible: parent.parent.parent.selected
                                     text: qsTr("%1%").arg(Math.round(Number(root.status.testEvent?.confidence ?? 0) * 100))
-                                    color: Colours.palette.m3primary
+                                    color: Colours.palette.m3success
                                     font: Tokens.font.label.small
                                 }
                             }
@@ -502,7 +502,7 @@ ColumnLayout {
                 Layout.fillWidth: true
                 text: root.testResultText()
                 wrapMode: Text.WordWrap
-                color: root.status.testEvent?.accepted ? Colours.palette.m3primary : Colours.palette.m3onSurfaceVariant
+                color: root.status.testEvent?.zone ? Colours.palette.m3success : Colours.palette.m3onSurfaceVariant
                 font: Tokens.font.body.small
             }
         }

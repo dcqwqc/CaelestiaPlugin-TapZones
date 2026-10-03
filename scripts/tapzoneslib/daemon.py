@@ -448,12 +448,18 @@ class Daemon:
         if legacy_signature is None:
             if capture["mode"] == "test":
                 self.status["testEvent"] = {
+                    "serial": getattr(self, "test_serial", 0),
                     "zone": None,
                     "confidence": 0.0,
                     "accepted": False,
                     "reason": "fingerprint-failed",
                 }
-                self.status["testActive"] = False
+                # Test mode is continuous. Keep the last result visible and
+                # simply re-arm after a short quiet period.
+                self.status["testActive"] = True
+                self.status["testArmed"] = False
+                self.audio_detector.reset(require_quiet=True)
+                self.test_armed_at = time.monotonic()
             return
 
         mode = capture["mode"]
@@ -541,9 +547,14 @@ class Daemon:
                 "fingerprintVersion": 3 if use_enhanced else 2,
                 "model": self.status.get("activeModel"),
             }
-            self.status["testActive"] = False
+            # Continuous playground: keep listening after every result.
+            # The result stays on screen while the detector waits for two
+            # quiet frames (~40 ms) before accepting the next physical tap.
+            self.status["testActive"] = True
             self.status["testArmed"] = False
             self.pending = []
+            self.audio_detector.reset(require_quiet=True)
+            self.test_armed_at = time.monotonic()
             return
 
         if mode == "normal":
