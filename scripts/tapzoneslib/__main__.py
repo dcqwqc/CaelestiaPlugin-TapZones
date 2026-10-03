@@ -1,10 +1,18 @@
 import argparse,json
-from .core import ZONES,discover_accel,read_json,run_action,xdg,atomic_json
+from .core import ZONES,discover_accel,load_classifier,read_json,run_action,xdg,atomic_json
 from .daemon import run
+
+
+def inactive_status():
+ c=load_classifier()
+ return {"running":False,"audio":"unavailable","accel":str(discover_accel() or "unavailable"),"calibration":None,"lastEvent":None,"lastAction":None,"profile":c.profile(),"profileReady":c.profile_ready(),"triggerSource":"unavailable","degraded":True}
+
+
 def main():
  p=argparse.ArgumentParser();s=p.add_subparsers(dest="cmd",required=True);s.add_parser("daemon");s.add_parser("status");c=s.add_parser("calibrate");c.add_argument("zone",choices=ZONES);c.add_argument("--count",type=int,default=12);s.add_parser("reset");a=s.add_parser("action-test");a.add_argument("action");a.add_argument("--custom-json",default="[]");s.add_parser("accel-discover");args=p.parse_args()
  if args.cmd=="daemon":run();return 0
- if args.cmd=="status":print(json.dumps(read_json(xdg("runtime","status.json"),{"running":False,"accel":str(discover_accel() or "unavailable")})));return 0
+ if args.cmd=="status":
+  status=inactive_status();status.update(read_json(xdg("runtime","status.json"),{}));print(json.dumps(status));return 0
  if args.cmd=="accel-discover":print(str(discover_accel() or ""));return 0 if discover_accel() else 1
  if args.cmd=="action-test":
   try:custom=json.loads(args.custom_json)

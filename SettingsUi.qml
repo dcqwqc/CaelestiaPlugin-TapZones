@@ -47,6 +47,23 @@ ColumnLayout {
         calibration.running = true;
         refreshTimer.restart();
     }
+    function readinessText(): string {
+        const missing = zones.filter(zone => Number(status.profile?.[zone]?.count ?? 0) < 3);
+        if (missing.length === 0)
+            return qsTr("Calibration ready: all four zones have at least 3 samples.");
+        return qsTr("Calibration not ready: %1 still need at least 3 samples. Detection cannot fire yet.").arg(missing.join(", "));
+    }
+    function triggerText(): string {
+        if (status.triggerSource === "microphone" && status.degraded)
+            return qsTr("Trigger: microphone-only fallback because accelerometer samples are unavailable. It uses a conservative transient gate; a reboot may restore accelerometer accuracy.");
+        if (status.triggerSource === "microphone")
+            return qsTr("Trigger: microphone-only by policy, using a conservative transient gate.");
+        if (status.triggerSource === "accelerometer")
+            return qsTr("Trigger: accelerometer impulse.");
+        if (status.degraded)
+            return qsTr("Trigger: unavailable; required accelerometer samples cannot be read. A reboot may restore accelerometer accuracy.");
+        return qsTr("Trigger: waiting for sensor samples.");
+    }
 
     Process {
         id: statusProcess
@@ -150,7 +167,9 @@ ColumnLayout {
                 if (c && c.zone === modelData)
                     return c.complete ? `${modelData} — complete (${c.have}/${c.need})` : `${modelData} — tap now (${c.have}/${c.need})`;
                 const count = root.status.profile?.[modelData]?.count ?? 0;
-                return count ? `${modelData} — ${count} samples; recalibrate` : `${modelData} — start ${root.settings?.calibrationCount ?? 12} taps`;
+                if (count < 3)
+                    return count ? `${modelData} — ${count}/3 minimum samples; continue calibration` : `${modelData} — start ${root.settings?.calibrationCount ?? 12} taps`;
+                return `${modelData} — ${count} samples; recalibrate`;
             }
             onClicked: root.calibrate(modelData)
         }
@@ -226,7 +245,7 @@ ColumnLayout {
         wrapMode: Text.WordWrap
         color: Colours.palette.m3outline
         font: Tokens.font.body.small
-        text: root.status.running ? qsTr("Service running · microphone: %1 · accelerometer: %2").arg(root.status.audio ?? "unknown").arg(root.status.accel ?? "unknown") : qsTr("Service unavailable. Run install.sh install and check systemctl --user status tapzones.")
+        text: root.status.running ? `${qsTr("Service running · microphone: %1 · accelerometer: %2").arg(root.status.audio ?? "unknown").arg(root.status.accel ?? "unknown")}\n${root.triggerText()}\n${root.readinessText()}` : `${qsTr("Service unavailable. Run install.sh install and check systemctl --user status tapzones.")}\n${root.readinessText()}`
     }
     StepperRow {
         Layout.fillWidth: true

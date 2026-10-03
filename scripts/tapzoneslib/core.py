@@ -5,6 +5,51 @@ import numpy as np
 
 ZONES = ("TL", "TR", "BL", "BR")
 DEFAULT_ACTIONS = {"TL":{"1":"volume_up","2":"media_toggle","3":"next"},"TR":{"1":"volume_down","2":"previous","3":"media_toggle"},"BL":{"1":"previous","2":"volume_down","3":"none"},"BR":{"1":"next","2":"volume_up","3":"none"}}
+
+
+@dataclass(frozen=True)
+class TriggerDecision:
+    """The single trigger decision used by both calibration and detection."""
+
+    triggered: bool
+    source: str
+    degraded: bool
+
+
+def microphone_transient_gate(audio):
+    """Conservative, stateless microphone-only gate for a short PCM window.
+
+    A sustained sound can have sufficient RMS but a low crest factor. Requiring
+    both reduces false positives when the accelerometer cannot participate.
+    """
+    if not isinstance(audio, dict) or not audio.get("audio_ok"):
+        return False
+    try:
+        return float(audio.get("rms", 0.0)) >= 0.015 and float(audio.get("crest", 0.0)) >= 2.5
+    except (TypeError, ValueError):
+        return False
+
+
+def trigger_decision(policy, accel_available, impulse, accel_threshold, audio):
+    """Select exactly one gate according to the configured accel policy.
+
+    ``preferred`` is deliberately not a logical OR: an available accelerometer
+    is authoritative. Its microphone fallback is only active while an accel
+    sample cannot be read. ``off`` is intentionally microphone-only.
+    """
+    policy = policy if policy in ("required", "preferred", "off") else "required"
+    accel_gate = accel_available and impulse >= accel_threshold
+    mic_gate = microphone_transient_gate(audio)
+
+    if policy == "off":
+        return TriggerDecision(mic_gate, "microphone", False)
+    if accel_available:
+        return TriggerDecision(accel_gate, "accelerometer", False)
+    if policy == "preferred":
+        return TriggerDecision(mic_gate, "microphone", True)
+    return TriggerDecision(False, "unavailable", True)
+
+
 def xdg(kind, leaf):
     e={"config":"XDG_CONFIG_HOME","state":"XDG_STATE_HOME","runtime":"XDG_RUNTIME_DIR"}[kind]; base=os.environ.get(e) or {"config":os.path.expanduser("~/.config"),"state":os.path.expanduser("~/.local/state"),"runtime":"/tmp"}[kind]
     p=pathlib.Path(base)/"tapzones"/leaf; p.parent.mkdir(parents=True,exist_ok=True); return p
@@ -42,6 +87,7 @@ def feature_vector(audio, accel, impulse):
 class Classifier:
     samples: dict
     def add(self,z,v): self.samples.setdefault(z,[]).append(v.tolist())
+    def profile_ready(self): return all(len(self.samples.get(zone,[])) >= 3 for zone in ZONES)
     def profile(self):
         out={}
         for z,raw in self.samples.items():
