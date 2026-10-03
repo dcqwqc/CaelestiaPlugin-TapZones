@@ -169,13 +169,15 @@ ColumnLayout {
 
     function testResultText(): string {
         const event = status.testEvent;
-        if (!status.profileReady)
-            return qsTr("Finish the four-zone calibration first, then start the live test.");
         if (!event)
-            return status.testActive ? qsTr("Armed. Tap the desk and I’ll show which zone the classifier thinks it was.") : qsTr("Start a 30-second test session. Actions are suppressed while testing.");
-        const pct = Math.round(Number(event.confidence ?? 0) * 100);
+            return status.testActive ? qsTr("Armed. Tap the desk. With trained zones I’ll show the prediction; without them I’ll still show that the tap was detected.") : qsTr("Start a 30-second test session. Actions are suppressed while testing.");
         const source = event.triggerSource === "microphone" ? qsTr("microphone") : qsTr("accelerometer");
-        return event.accepted ? qsTr("%1 · %2% confidence · accepted · %3").arg(zoneName(event.zone)).arg(pct).arg(source) : qsTr("%1 · %2% confidence · below your %3% threshold · %4").arg(zoneName(event.zone)).arg(pct).arg(Math.round(Number(event.threshold ?? 0) * 100)).arg(source);
+        const trained = Number(event.trainedZones?.length ?? 0);
+        if (!event.zone)
+            return qsTr("Tap detected · %1 · no trained zones yet. Calibrate any corner and the next test can start predicting it.").arg(source);
+        const pct = Math.round(Number(event.confidence ?? 0) * 100);
+        const suffix = event.profileReady ? qsTr("all 4 zones trained") : qsTr("%1/4 zones trained").arg(trained);
+        return event.accepted ? qsTr("%1 · %2% confidence · accepted · %3 · %4").arg(zoneName(event.zone)).arg(pct).arg(source).arg(suffix) : qsTr("%1 · %2% confidence · below your %3% threshold · %4 · %5").arg(zoneName(event.zone)).arg(pct).arg(Math.round(Number(event.threshold ?? 0) * 100)).arg(source).arg(suffix);
     }
 
     Process {
@@ -393,7 +395,6 @@ ColumnLayout {
                     icon: root.status.testActive ? "stop_circle" : "play_circle"
                     text: root.status.testActive ? qsTr("Stop") : qsTr("Start test")
                     type: root.status.testActive ? IconTextButton.Filled : IconTextButton.Tonal
-                    disabled: !root.status.profileReady
                     onClicked: root.toggleLiveTest()
                 }
             }

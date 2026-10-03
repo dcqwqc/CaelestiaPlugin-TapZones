@@ -82,4 +82,22 @@ class DaemonCliTests(unittest.TestCase):
   self.assertEqual(daemon.status["testEvent"]["zone"],"BR")
   self.assertTrue(daemon.status["testEvent"]["accepted"])
   self.assertEqual(daemon.pending,[])
+ def test_live_test_with_zero_trained_zones_still_runs_safely(self):
+  import time
+  transient={"audio_ok":True,"rms":.02,"crest":3.0}
+  classifier=Mock();classifier.profile.return_value={};classifier.profile_ready.return_value=False;classifier.classify.return_value=(None,0.0)
+  daemon=Daemon.__new__(Daemon)
+  daemon.accel_device=object();daemon.classifier=classifier
+  daemon.status={"calibration":None,"profile":{},"profileReady":False,"lastAction":None}
+  daemon.q=queue.Queue();daemon.q.put(object());daemon.prev=np.zeros(3);daemon.last_accept=0.;daemon.pending=[];daemon.command=lambda:None
+  daemon.test_until=time.monotonic()+10;daemon.test_last_accept=0.;daemon.test_serial=0
+  cfg={"enabled":True,"sensitivity":55,"confidence":72,"accelPolicy":"off","cooldownMs":700,"multiTapWindowMs":420}
+  with patch("tapzoneslib.daemon.effective_config",return_value=cfg), patch("tapzoneslib.daemon.accel_sample",return_value=np.zeros(3)), patch("tapzoneslib.daemon.audio_features",return_value=transient), patch("tapzoneslib.daemon.run_action") as action:
+   daemon.tick()
+  classifier.classify.assert_called_once()
+  action.assert_not_called()
+  self.assertTrue(daemon.status["testActive"])
+  self.assertEqual(daemon.status["testEvent"]["reason"],"no-trained-zones")
+  self.assertEqual(daemon.status["testEvent"]["trainedZones"],[])
+  self.assertEqual(daemon.pending,[])
 if __name__=="__main__":unittest.main()

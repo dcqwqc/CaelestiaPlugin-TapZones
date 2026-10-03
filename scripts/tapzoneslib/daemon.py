@@ -68,11 +68,20 @@ class Daemon:
   if self.status["testActive"]:
    if now-getattr(self,"test_last_accept",0.)>=.28:
     self.test_last_accept=now;self.test_serial=getattr(self,"test_serial",0)+1
-    if self.status["profileReady"]:
-     zone,confidence=self.classifier.classify(v,0.0);limit=float(cfg.get("confidence",72))/100
-     self.status["testEvent"]={"serial":self.test_serial,"zone":zone,"confidence":round(confidence,3),"accepted":bool(zone and confidence>=limit),"threshold":round(limit,3),"triggerSource":trigger.source,"degraded":trigger.degraded}
-    else:
-     self.status["testEvent"]={"serial":self.test_serial,"zone":None,"confidence":0.0,"accepted":False,"reason":"calibration-incomplete","triggerSource":trigger.source,"degraded":trigger.degraded}
+    zone,confidence=self.classifier.classify(v,0.0);limit=float(cfg.get("confidence",72))/100
+    trained=[z for z,p in self.status.get("profile",{}).items() if int(p.get("count",0))>=3]
+    self.status["testEvent"]={
+     "serial":self.test_serial,
+     "zone":zone,
+     "confidence":round(confidence,3),
+     "accepted":bool(zone and confidence>=limit),
+     "threshold":round(limit,3),
+     "triggerSource":trigger.source,
+     "degraded":trigger.degraded,
+     "trainedZones":trained,
+     "profileReady":self.status["profileReady"],
+     "reason":None if zone else "no-trained-zones",
+    }
    self.pending=[];return
   if not cfg.get("enabled") or not self.status["profileReady"] or now-self.last_accept<int(cfg.get("cooldownMs",700))/1000:self.flush(cfg);return
   zone,confidence=self.classifier.classify(v,float(cfg.get("confidence",72))/100)
