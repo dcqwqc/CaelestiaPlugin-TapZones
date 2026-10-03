@@ -8,7 +8,7 @@ Tap Zones is a local-only four-corner laptop-tap detector for Caelestia. It is i
 
 Tap detection and location are separate. Detection stays low-latency on 20 ms windows. Once an impact is accepted, Tap Zones keeps a short ~80–100 ms in-memory stereo snippet around that onset and derives a v2 location fingerprint: GCC-PHAT stereo delay, left/right level ratios, seven normalized frequency bands plus their left/right asymmetry, per-channel spectral centroids, and the early decay envelope. Raw PCM is discarded immediately after the fingerprint is calculated.
 
-The v2 classifier learns which fingerprint dimensions actually separate TL/TR/BL/BR on this laptop. It uses robust median/MAD corner models, data-driven feature weights, local-neighbour distance, confidence rejection, and leave-one-out calibration validation.
+The v2 classifier treats location as two separate problems: **left/right** and **top/bottom**. Each axis selects a small robust feature set from the calibration data using leave-one-out scoring, then combines both axis predictions into TL/TR/BL/BR. This matches Mirai's actual microphone data much better than a single four-way distance model. Calibration diagnostics report overall, left/right, and top/bottom validation accuracy separately.
 
 ## Trigger policy and calibration readiness
 

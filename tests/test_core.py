@@ -18,10 +18,23 @@ from tapzoneslib.core import (
     location_signature,
     microphone_transient_gate,
     trigger_decision,
+    tap_gate_features,
 )
 
 
 class CoreTests(unittest.TestCase):
+    def test_gate_features_are_lightweight_and_finite(self):
+        pcm = np.zeros((960, 2), dtype="<i2")
+        pcm[120, :] = 12000
+        features = tap_gate_features(pcm)
+        self.assertTrue(features["audio_ok"])
+        self.assertGreater(features["peak"], 0)
+        self.assertGreater(features["crest"], 1)
+        self.assertEqual(
+            set(features),
+            {"audio_ok", "rms", "peak", "crest"},
+        )
+
     def test_features_are_finite_and_stereo_lag(self):
         n = 1024
         left = (np.sin(np.arange(n) * 0.08) * 12000).astype("<i2")

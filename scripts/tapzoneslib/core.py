@@ -79,6 +79,22 @@ def accel_sample(device):
     try:
         scale=float((device/"in_accel_scale").read_text().strip()); return np.array([float((device/f"in_accel_{a}_raw").read_text().strip())*scale for a in "xyz"],float)
     except (OSError,ValueError): return None
+def tap_gate_features(pcm):
+    """Cheap per-frame features for the always-on onset detector."""
+    if pcm is None or pcm.ndim != 2 or pcm.shape[1] != 2 or len(pcm) < 32:
+        return {"audio_ok": False}
+    x = pcm.astype(np.float64) / 32768.0
+    mono = x.mean(axis=1)
+    rms = float(np.sqrt(np.mean(mono * mono)))
+    peak = float(np.max(np.abs(mono)))
+    return {
+        "audio_ok": True,
+        "rms": rms,
+        "peak": peak,
+        "crest": float(peak / max(rms, 1e-8)),
+    }
+
+
 def audio_features(pcm, rate=48000):
     """Feature extraction only; PCM remains solely in the caller's RAM."""
     if pcm.ndim!=2 or pcm.shape[1]!=2 or len(pcm)<32: return {"audio_ok":False}
@@ -300,7 +316,26 @@ def feature_vector(audio, accel, impulse):
 class Classifier:
     samples: dict
 
+    # The four-corner problem is much more stable on Mirai when decomposed
+    # into two binary axes. Candidate sets are intentionally small and tied to
+    # physically meaningful stereo / spectral / envelope features.
+    LR_FEATURE_SETS = (
+        (0,), (1,), (2,), (14,), (17,), (18,), (25,), (26,), (27,),
+        (28,), (29,),
+        (0,25), (0,26), (0,27), (0,29),
+        (14,17), (14,18), (17,25), (17,28),
+        (18,25), (18,28), (25,28), (25,29),
+    )
+    TB_FEATURE_SETS = (
+        (0,), (1,), (3,), (4,), (5,), (6,), (7,), (8,), (9,),
+        (17,), (18,), (19,), (20,), (21,), (22,), (23,), (24,),
+        (28,), (29,),
+        (0,19), (0,23), (3,19), (3,23),
+        (7,23), (12,29), (19,29), (22,23), (22,24), (23,25),
+    )
+
     def add(self, zone, vector):
+        self._axis_cache = None
         vector = np.asarray(vector, dtype=float)
         if vector.ndim != 1:
             raise ValueError("location signature must be one-dimensional")
@@ -327,79 +362,128 @@ class Classifier:
                 }
         return out
 
-    def _model(self):
-        trained = {
-            zone: np.asarray(raw, float)
+    @staticmethod
+    def _axis_label(zone, axis):
+        if axis == "LR":
+            return "L" if zone.endswith("L") else "R"
+        return "T" if zone.startswith("T") else "B"
+
+    def _rows(self):
+        return [
+            (zone, np.asarray(vector, float))
             for zone, raw in self.samples.items()
-            if len(raw) >= CLASSIFIER_MIN_SAMPLES
-        }
-        if not trained:
-            return None
-        dims = {matrix.shape[1] for matrix in trained.values()}
-        if len(dims) != 1:
-            return None
-
-        all_samples = np.vstack(list(trained.values()))
-        # Median/MAD makes one accidental non-tap calibration sample far less
-        # able to drag an entire corner model away from its real cluster.
-        means = {zone: np.median(matrix, axis=0) for zone, matrix in trained.items()}
-        mean_matrix = np.vstack(list(means.values()))
-
-        within_parts = [
-            np.abs(matrix - means[zone])
-            for zone, matrix in trained.items()
+            for vector in raw
         ]
-        within_mad = np.vstack(within_parts)
-        within_scale = np.median(within_mad, axis=0) * 1.4826
-        global_var = all_samples.var(0)
-        between_var = mean_matrix.var(0)
 
-        scale = np.sqrt(within_scale ** 2 + 0.18 * global_var + 1e-5)
-        fisher = between_var / (within_scale ** 2 + 0.12 * global_var + 1e-5)
-        weights = np.clip(fisher, 0.08, 8.0)
-        weights /= max(float(weights.mean()), 1e-8)
-        return trained, means, scale, weights
+    @staticmethod
+    def _robust_scale(rows, features):
+        matrix = np.vstack([vector[list(features)] for _, vector in rows])
+        median = np.median(matrix, axis=0)
+        scale = (
+            np.median(np.abs(matrix - median), axis=0) * 1.4826
+        )
+        return median, np.maximum(scale, 1e-4)
 
-    def _distances(self, vector):
-        model = self._model()
-        if model is None:
-            return []
-        trained, means, scale, weights = model
-        vector = np.asarray(vector, float)
-        if vector.shape != scale.shape:
-            return []
+    @classmethod
+    def _predict_axis_from_rows(cls, rows, vector, axis, features):
+        if not rows:
+            return None, 0.0, float("inf")
 
+        _, scale = cls._robust_scale(rows, features)
+        target = np.asarray(vector, float)[list(features)]
         distances = []
-        for zone, matrix in trained.items():
-            centroid = float(np.sqrt(np.average(
-                ((vector - means[zone]) / scale) ** 2, weights=weights
+        for zone, sample in rows:
+            distance = float(np.sqrt(np.mean(
+                ((target - sample[list(features)]) / scale) ** 2
             )))
-            sample_distances = np.sqrt(np.average(
-                ((matrix - vector) / scale) ** 2, axis=1, weights=weights
-            ))
-            local = float(np.mean(np.sort(sample_distances)[:2]))
-            distances.append((0.65 * centroid + 0.35 * local, zone))
-        return sorted(distances)
+            distances.append((distance, cls._axis_label(zone, axis)))
+        distances.sort()
+
+        nearest = distances[:min(3, len(distances))]
+        votes = {}
+        for distance, label in nearest:
+            votes[label] = votes.get(label, 0.0) + 1.0 / (distance + 1e-5)
+
+        if not votes:
+            return None, 0.0, float("inf")
+
+        ordered = sorted(votes.items(), key=lambda item: item[1], reverse=True)
+        label, best_vote = ordered[0]
+        other_vote = ordered[1][1] if len(ordered) > 1 else 0.0
+        total_vote = best_vote + other_vote
+        vote_confidence = best_vote / max(total_vote, 1e-8)
+
+        # Distance guard: a unanimous vote should not become high confidence
+        # for a sample that is nowhere near the calibration manifold.
+        nearest_distance = nearest[0][0]
+        distance_penalty = math.exp(-max(0.0, nearest_distance - 3.0) / 2.0)
+        confidence = float(np.clip(
+            vote_confidence * distance_penalty, 0.0, 1.0
+        ))
+        return label, confidence, nearest_distance
+
+    def _axis_cv_accuracy(self, axis, features):
+        rows = self._rows()
+        if len(rows) < 4:
+            return 0.0
+        correct = 0
+        for index, (zone, vector) in enumerate(rows):
+            train = [row for i, row in enumerate(rows) if i != index]
+            predicted, _, _ = self._predict_axis_from_rows(
+                train, vector, axis, features
+            )
+            correct += predicted == self._axis_label(zone, axis)
+        return correct / len(rows)
+
+    def _best_axis_features(self, axis):
+        candidates = (
+            self.LR_FEATURE_SETS if axis == "LR" else self.TB_FEATURE_SETS
+        )
+        scored = [
+            (self._axis_cv_accuracy(axis, features), -len(features), features)
+            for features in candidates
+        ]
+        return max(scored)[2] if scored else (0,)
+
+    def axis_model_info(self):
+        if not self.profile_ready():
+            return None
+        cached = getattr(self, "_axis_cache", None)
+        if cached is not None:
+            return cached
+        lr_features = self._best_axis_features("LR")
+        tb_features = self._best_axis_features("TB")
+        self._axis_cache = {
+            "lrFeatures": list(lr_features),
+            "tbFeatures": list(tb_features),
+            "lrValidation": self._axis_cv_accuracy("LR", lr_features),
+            "tbValidation": self._axis_cv_accuracy("TB", tb_features),
+        }
+        return self._axis_cache
 
     def classify(self, vector, threshold=.72):
-        distances = self._distances(vector)
-        if not distances:
+        if not self.profile_ready():
             return None, 0.0
 
-        best_distance, best_zone = distances[0]
-        if len(distances) == 1:
-            margin = 0.0
-        else:
-            second = distances[1][0]
-            margin = max(0.0, (second - best_distance) / max(second, 1e-8))
+        rows = self._rows()
+        info = self.axis_model_info()
+        lr_features = tuple(info["lrFeatures"])
+        tb_features = tuple(info["tbFeatures"])
 
-        confidence = 0.5 + 0.5 * math.tanh(3.2 * margin)
-        if best_distance > 3.2:
-            confidence *= math.exp(-(best_distance - 3.2) / 2.5)
-        confidence = float(np.clip(confidence, 0.0, 1.0))
+        lr, lr_confidence, _ = self._predict_axis_from_rows(
+            rows, vector, "LR", lr_features
+        )
+        tb, tb_confidence, _ = self._predict_axis_from_rows(
+            rows, vector, "TB", tb_features
+        )
+        if lr is None or tb is None:
+            return None, 0.0
+
+        zone = tb + lr
+        confidence = float(min(lr_confidence, tb_confidence))
         if threshold > 0 and confidence < threshold:
             return None, confidence
-        return best_zone, confidence
+        return zone, confidence
 
     def validation_accuracy(self):
         if not all(
@@ -408,28 +492,46 @@ class Classifier:
         ):
             return None
 
+        info = self.axis_model_info()
+        lr_features = tuple(info["lrFeatures"])
+        tb_features = tuple(info["tbFeatures"])
+        rows = self._rows()
+
         correct = 0
         total = 0
         confusion = {z:{other:0 for other in ZONES} for z in ZONES}
-        for zone in ZONES:
-            for index, vector in enumerate(self.samples[zone]):
-                reduced = {
-                    z:[
-                        sample for sample_index, sample in enumerate(self.samples[z])
-                        if z != zone or sample_index != index
-                    ]
-                    for z in ZONES
-                }
-                predicted, _ = Classifier(reduced).classify(vector, 0.0)
-                if predicted in ZONES:
-                    confusion[zone][predicted] += 1
-                correct += predicted == zone
-                total += 1
+        axis_correct = {"LR":0, "TB":0}
+
+        for index, (zone, vector) in enumerate(rows):
+            train = [row for i, row in enumerate(rows) if i != index]
+            lr, _, _ = self._predict_axis_from_rows(
+                train, vector, "LR", lr_features
+            )
+            tb, _, _ = self._predict_axis_from_rows(
+                train, vector, "TB", tb_features
+            )
+            predicted = (tb + lr) if lr is not None and tb is not None else None
+            if predicted in ZONES:
+                confusion[zone][predicted] += 1
+                axis_correct["LR"] += (
+                    self._axis_label(predicted, "LR")
+                    == self._axis_label(zone, "LR")
+                )
+                axis_correct["TB"] += (
+                    self._axis_label(predicted, "TB")
+                    == self._axis_label(zone, "TB")
+                )
+            correct += predicted == zone
+            total += 1
+
         return {
             "accuracy": correct / max(total, 1),
             "correct": correct,
             "total": total,
             "confusion": confusion,
+            "lrAccuracy": axis_correct["LR"] / max(total, 1),
+            "tbAccuracy": axis_correct["TB"] / max(total, 1),
+            **info,
         }
 
 

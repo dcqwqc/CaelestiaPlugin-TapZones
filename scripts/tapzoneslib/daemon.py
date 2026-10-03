@@ -13,6 +13,7 @@ from .core import (
     DEFAULT_CALIBRATION_SAMPLES,
     accel_sample,
     audio_features,
+    tap_gate_features,
     atomic_json,
     discover_accel,
     effective_config,
@@ -30,6 +31,9 @@ class Daemon:
         self.classifier = load_classifier()
         self.q = queue.Queue(maxsize=16)
         self.prev_accel = None
+        self.next_accel_discovery = 0.0
+        self.cached_config = effective_config()
+        self.next_config_refresh = 0.0
         self.last_accept = 0.0
         self.pending = []
 
@@ -57,6 +61,7 @@ class Daemon:
             "profile": self.classifier.profile(),
             "profileReady": self.classifier.profile_ready(),
             "calibrationQuality": self.classifier.validation_accuracy(),
+            "axisModel": self.classifier.axis_model_info(),
             "triggerSource": "unknown",
             "degraded": False,
             "testActive": False,
@@ -74,10 +79,12 @@ class Daemon:
     def publish(self):
         atomic_json(xdg("runtime", "status.json"), self.status)
 
-    def refresh_profile_status(self):
+    def refresh_profile_status(self, recompute_quality=True):
         self.status["profile"] = self.classifier.profile()
         self.status["profileReady"] = self.classifier.profile_ready()
-        self.status["calibrationQuality"] = self.classifier.validation_accuracy()
+        if recompute_quality:
+            self.status["calibrationQuality"] = self.classifier.validation_accuracy()
+            self.status["axisModel"] = self.classifier.axis_model_info()
 
     def drain_audio(self):
         while True:
@@ -145,6 +152,7 @@ class Daemon:
         if kind == "calibrate":
             zone = command["zone"]
             self.classifier.samples.pop(zone, None)
+            self.classifier._axis_cache = None
             save_classifier(self.classifier)
             self.refresh_profile_status()
             self.drain_audio()
@@ -169,6 +177,7 @@ class Daemon:
 
         elif kind == "reset":
             self.classifier.samples = {}
+            self.classifier._axis_cache = None
             save_classifier(self.classifier)
             self.status["calibration"] = None
             self.status["testActive"] = False
@@ -358,13 +367,17 @@ class Daemon:
                 }
 
     def tick(self):
-        cfg = effective_config()
         self.command()
         now = time.monotonic()
+        if now >= self.next_config_refresh:
+            self.cached_config = effective_config()
+            self.next_config_refresh = now + 0.5
+        cfg = self.cached_config
 
         accel = accel_sample(self.accel_device)
-        if self.accel_device is None or accel is None:
+        if accel is None and now >= self.next_accel_discovery:
             self.accel_device = discover_accel()
+            self.next_accel_discovery = now + 2.0
             accel = accel_sample(self.accel_device)
         self.status["accel"] = (
             str(self.accel_device) if accel is not None else "unavailable"
@@ -379,7 +392,7 @@ class Daemon:
 
         try:
             frame = self.q.get_nowait()
-            audio = audio_features(frame)
+            audio = tap_gate_features(frame)
         except queue.Empty:
             frame = None
             audio = {"audio_ok": False}
@@ -434,7 +447,6 @@ class Daemon:
             self.audio_detector.last_peak_threshold, 6
         )
         self.status["detectorReady"] = detector_ready_after
-        self.refresh_profile_status()
 
         calibration = self.status.get("calibration")
         if calibration and not calibration.get("complete"):
@@ -502,9 +514,13 @@ class Daemon:
 
     def run(self):
         threading.Thread(target=self.capture, daemon=True).start()
+        next_publish = 0.0
         while True:
             self.tick()
-            self.publish()
+            now = time.monotonic()
+            if now >= next_publish:
+                self.publish()
+                next_publish = now + 0.1
             time.sleep(0.02)
 
 
