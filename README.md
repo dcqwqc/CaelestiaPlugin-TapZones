@@ -60,4 +60,4 @@ The second command removes only saved feature profiles/configuration; it does no
 
 ### Live recognition test
 
-The plugin settings include a 30-second classifier playground. After all four zones have at least three calibration samples, start the test and tap freely: the UI highlights the predicted TL/TR/BL/BR zone, shows confidence and trigger source, and tells you whether the result clears the configured confidence threshold. Normal mapped actions are suppressed for the whole test session.
+The plugin settings include a one-shot classifier playground. Press Test, tap once, and the result freezes immediately; press Test again for the next sample. With trained zones the UI highlights the predicted TL/TR/BL/BR zone, confidence and trigger source. With no trained zones it reports that the tap was detected but does not invent a location. Normal mapped actions are always suppressed during the test.

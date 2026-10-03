@@ -143,7 +143,7 @@ ColumnLayout {
     }
 
     function toggleLiveTest(): void {
-        tester.command = status.testActive ? [helper, "test-stop"] : [helper, "test-start", "--seconds", "30"];
+        tester.command = status.testActive ? [helper, "test-stop"] : [helper, "test-start"];
         tester.running = true;
         refreshTimer.restart();
     }
@@ -170,7 +170,7 @@ ColumnLayout {
     function testResultText(): string {
         const event = status.testEvent;
         if (!event)
-            return status.testActive ? qsTr("Armed. Tap the desk. With trained zones I’ll show the prediction; without them I’ll still show that the tap was detected.") : qsTr("Start a 30-second test session. Actions are suppressed while testing.");
+            return status.testActive ? qsTr("Armed. Tap once — the result freezes immediately.") : qsTr("Press Test, tap once, then press Test again for another try. Actions stay disabled during the test.");
         const source = event.triggerSource === "microphone" ? qsTr("microphone") : qsTr("accelerometer");
         const trained = Number(event.trainedZones?.length ?? 0);
         if (!event.zone)
@@ -205,7 +205,7 @@ ColumnLayout {
 
     Timer {
         id: refreshTimer
-        interval: root.status.testActive ? 220 : 700
+        interval: root.status.testActive ? 100 : 700
         repeat: true
         running: true
         onTriggered: root.refresh()
@@ -385,15 +385,15 @@ ColumnLayout {
 
                     StyledText {
                         Layout.fillWidth: true
-                        text: root.status.testActive ? qsTr("%1 seconds remaining · actions disabled").arg(Math.max(0, Math.ceil(Number(root.status.testRemainingMs ?? 0) / 1000))) : qsTr("See what Tap Zones thinks you tapped")
+                        text: root.status.testActive ? qsTr("Waiting for one new tap · actions disabled") : (root.status.testEvent ? qsTr("Result locked · press Test again to retry") : (root.status.profileReady ? qsTr("See what Tap Zones thinks you tapped") : qsTr("0/4 corners trained · train corners for location prediction")))
                         color: Colours.palette.m3outline
                         font: Tokens.font.label.small
                     }
                 }
 
                 IconTextButton {
-                    icon: root.status.testActive ? "stop_circle" : "play_circle"
-                    text: root.status.testActive ? qsTr("Stop") : qsTr("Start test")
+                    icon: root.status.testActive ? "stop_circle" : (root.status.testEvent ? "restart_alt" : "play_circle")
+                    text: root.status.testActive ? qsTr("Stop") : (root.status.testEvent ? qsTr("Test again") : qsTr("Test"))
                     type: root.status.testActive ? IconTextButton.Filled : IconTextButton.Tonal
                     onClicked: root.toggleLiveTest()
                 }
