@@ -294,7 +294,7 @@ ColumnLayout {
             id: policyRow
             anchors.fill: parent
             label: qsTr("Accelerometer")
-            subtext: qsTr("Preferred automatically falls back to the microphone when the sensor is unavailable.")
+            subtext: qsTr("Preferred uses microphone onset first so a slow accelerometer can never hide a real chassis or table tap.")
             menuItems: policyPicker.entries
             active: {
                 const value = String(root.settings?.accelPolicy ?? "preferred");

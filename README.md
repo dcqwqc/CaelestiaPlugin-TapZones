@@ -15,10 +15,10 @@ The v2 classifier treats location as two separate problems: **left/right** and *
 The same trigger policy gates both guided calibration samples and normal tap detection:
 
 - `required` accepts only an accelerometer impulse. If the accelerometer cannot be sampled, it does not substitute microphone audio.
-- `preferred` uses the accelerometer whenever it can be sampled. Only while samples are unavailable does it degrade to a conservative microphone transient gate (both sufficient RMS and crest are required).
-- `off` intentionally uses that microphone transient gate and ignores the accelerometer gate.
+- `preferred` uses the adaptive microphone onset detector first. If microphone capture is unavailable, it may fall back to the accelerometer. This prevents Mirai's dynamically reappearing but slow IIO accelerometer from masking real chassis/table taps.
+- `off` intentionally uses the microphone detector only and ignores the accelerometer gate.
 
-The diagnostics panel reports the active trigger source and whether `preferred` is currently in microphone-only fallback; when accelerometer samples cannot be read, it notes that a reboot may restore accelerometer accuracy. Detection cannot classify a location or run an action until **TL, TR, BL, and BR each contain at least five v2 fingerprints**. Guided calibration defaults to **six taps per corner** so the sixth sample can also be used for leave-one-out quality validation.
+The diagnostics panel reports the active trigger source and whether `preferred` had to fall back away from its normal microphone path; when accelerometer samples cannot be read, it notes that a reboot may restore accelerometer accuracy. Detection cannot classify a location or run an action until **TL, TR, BL, and BR each contain at least five v2 fingerprints**. Guided calibration defaults to **six taps per corner** so the sixth sample can also be used for leave-one-out quality validation.
 
 ## Install, calibrate, use
 
@@ -67,7 +67,7 @@ The plugin settings include a continuous live classifier playground. Press **Sta
 Every live-test tap also keeps its derived v2 and, when capture quality permits, v3 fingerprint temporarily in daemon memory. If the prediction is wrong, tap the corner card it **should** have been; if it was right, tap the already-highlighted card to confirm it. That human label is persisted as new training data for both models, validation and v2/v3 eligibility are recomputed immediately, and the UI marks the sample as learned. Live feedback keeps the robust feature subset chosen during guided calibration stable, so every new label improves the nearest-neighbour dataset without re-running the expensive feature search on each tap. Raw PCM is still discarded immediately and is never stored. To keep leave-one-out retraining responsive, live learning uses a rolling maximum of **32 fingerprints per corner**.
 ### Adaptive tap detection
 
-When the accelerometer is unavailable, Tap Zones uses a stateful microphone detector rather than a fixed loudness threshold. It learns the local noise floor from quiet 20 ms windows, requires a fast RMS + peak onset, emits once per rising edge, and will not re-arm until the impact has released. Calibration also waits for quiet after the button press before it accepts a sample, so the UI click/handling noise cannot become the corner sample.
+Tap Zones uses its stateful microphone detector as the normal preferred trigger path rather than a fixed loudness threshold. It learns the local noise floor from quiet 20 ms windows, requires a fast RMS + peak onset, emits once per rising edge, and will not re-arm until the impact has released. The accelerometer remains available as an explicit required mode or as fallback when microphone capture is unavailable. Calibration also waits for quiet after the button press before it accepts a sample, so the UI click/handling noise cannot become the corner sample.
 
 ## Research v3: dispersion-aware localization
 

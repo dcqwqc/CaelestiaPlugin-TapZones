@@ -43,22 +43,29 @@ def microphone_transient_gate(audio):
 
 
 def trigger_decision(policy, accel_available, impulse, accel_threshold, audio):
-    """Select exactly one gate according to the configured accel policy.
+    """Select one trigger gate without letting a slow IIO sensor mask taps.
 
-    ``preferred`` is deliberately not a logical OR: an available accelerometer
-    is authoritative. Its microphone fallback is only active while an accel
-    sample cannot be read. ``off`` is intentionally microphone-only.
+    Mirai can expose the IIO accelerometer dynamically, but its userspace
+    samples are too slow for reliable desk/chassis impact onset. Preferred
+    therefore keeps microphone onset primary and uses accel only as fallback.
     """
-    policy = policy if policy in ("required", "preferred", "off") else "required"
+    policy = policy if policy in ("required", "preferred", "off") else "preferred"
     accel_gate = accel_available and impulse >= accel_threshold
+    mic_available = isinstance(audio, dict) and audio.get("audio_ok")
     mic_gate = microphone_transient_gate(audio)
 
+    if policy == "required":
+        return TriggerDecision(
+            bool(accel_gate),
+            "accelerometer" if accel_available else "unavailable",
+            not accel_available,
+        )
     if policy == "off":
-        return TriggerDecision(mic_gate, "microphone", False)
+        return TriggerDecision(bool(mic_gate), "microphone", False)
+    if mic_available:
+        return TriggerDecision(bool(mic_gate), "microphone", False)
     if accel_available:
-        return TriggerDecision(accel_gate, "accelerometer", False)
-    if policy == "preferred":
-        return TriggerDecision(mic_gate, "microphone", True)
+        return TriggerDecision(bool(accel_gate), "accelerometer", True)
     return TriggerDecision(False, "unavailable", True)
 
 
@@ -178,7 +185,17 @@ class AudioTapDetector:
             self.latched = True
             self.quiet_frames = 0
         else:
-            if rms <= release:
+            # "Quiet" means settled, not necessarily silent. A steady louder
+            # room must still be able to re-arm; a new tap is separately
+            # required to rise sharply above the immediately preceding frame.
+            settled = (
+                rms <= release
+                or (
+                    self.prev_rms > 0.0
+                    and rms <= self.prev_rms * 1.10
+                )
+            )
+            if settled:
                 self.quiet_frames = min(20, self.quiet_frames + 1)
                 if self.quiet_frames >= 2:
                     self.latched = False

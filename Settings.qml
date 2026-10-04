@@ -38,7 +38,7 @@ SettingsObject {
     }
     SettingMeta on accelPolicy {
         label: "Accelerometer policy"
-        description: "Required needs an impulse; preferred falls back to a conservative mic transient gate only if accel samples are unavailable; off is mic-only."
+        description: "Preferred uses reliable microphone onset first with accelerometer fallback; required is accelerometer-only; off is microphone-only."
         icon: "sensors"
         inputType: SettingMeta.SplitButton
         options: ["required", "preferred", "off"]

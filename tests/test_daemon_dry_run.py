@@ -15,6 +15,24 @@ from tapzoneslib.core import ACTIVE_LEARNING_MAX_SAMPLES, Classifier, EnhancedCl
 
 
 class DaemonV2Tests(unittest.TestCase):
+    def test_preferred_trigger_never_lets_accel_mask_microphone(self):
+        self.assertEqual(
+            Daemon._trigger_source("preferred", True, True),
+            ("microphone", False),
+        )
+        self.assertEqual(
+            Daemon._trigger_source("preferred", False, True),
+            ("accelerometer", True),
+        )
+        self.assertEqual(
+            Daemon._trigger_source("required", True, True),
+            ("accelerometer", False),
+        )
+        self.assertEqual(
+            Daemon._trigger_source("off", True, True),
+            ("microphone", False),
+        )
+
     def test_action_dry_run_and_status(self):
         env = os.environ.copy()
         env["XDG_RUNTIME_DIR"] = tempfile.mkdtemp()
@@ -62,6 +80,7 @@ class DaemonV2Tests(unittest.TestCase):
         daemon.test_last_zone = None
         daemon.test_tap_count = 0
         daemon.test_feedback_sample = None
+        daemon.calibration_samples = []
         daemon.audio_detector = Mock()
         daemon.fingerprint_capture = {
             "mode": mode,
@@ -85,9 +104,10 @@ class DaemonV2Tests(unittest.TestCase):
         }
         return daemon
 
-    def test_calibration_stores_v2_fingerprint(self):
+    def test_calibration_stages_without_destroying_existing_profile(self):
         classifier = Mock()
-        classifier.profile.return_value = {}
+        classifier.samples = {"TR": [[9.0] * 30]}
+        classifier.profile.return_value = {"TR": {"count": 1}}
         classifier.profile_ready.return_value = False
         classifier.validation_accuracy.return_value = None
         daemon = self._daemon_for_finish(classifier, "calibration")
@@ -102,13 +122,13 @@ class DaemonV2Tests(unittest.TestCase):
         with patch(
             "tapzoneslib.daemon.location_signature",
             return_value=signature,
-        ), patch("tapzoneslib.daemon.save_classifier"):
+        ), patch("tapzoneslib.daemon.save_classifier") as save:
             daemon._finish_fingerprint_capture({"confidence": 72})
 
-        classifier.add.assert_called_once()
-        self.assertEqual(classifier.add.call_args.args[0], "TR")
-        np.testing.assert_allclose(classifier.add.call_args.args[1], signature)
+        self.assertEqual(classifier.samples["TR"], [[9.0] * 30])
+        save.assert_not_called()
         self.assertEqual(daemon.status["calibration"]["have"], 1)
+        np.testing.assert_allclose(daemon.calibration_samples[0], signature)
 
     def test_live_test_stays_active_and_accepts_consecutive_taps(self):
         classifier = Mock()
@@ -254,6 +274,43 @@ class DaemonV2Tests(unittest.TestCase):
             daemon.test_feedback_sample["enhanced"],
             enhanced_signature,
         )
+
+    def test_live_test_marks_zero_confidence_impulse_unknown_but_teachable(self):
+        classifier = Mock()
+        classifier.profile.return_value = {
+            zone: {"count": 6} for zone in ("TL", "TR", "BL", "BR")
+        }
+        classifier.profile_ready.return_value = True
+        classifier.classify.return_value = ("TR", 0.0)
+        daemon = self._daemon_for_finish(classifier, "test")
+        daemon.enhanced_classifier = Mock()
+        daemon.status.update({
+            "activeModel": "v2-axis",
+            "enhancedProfile": {},
+            "enhancedProfileReady": False,
+        })
+
+        with patch(
+            "tapzoneslib.daemon.location_signature",
+            return_value=np.ones(30),
+        ), patch(
+            "tapzoneslib.daemon.enhanced_location_signature",
+            return_value=np.ones(58),
+        ), patch(
+            "tapzoneslib.daemon.capture_quality",
+            return_value={"ok": True},
+        ):
+            daemon._finish_fingerprint_capture({
+                "confidence": 72,
+                "multiTapWindowMs": 420,
+            })
+
+        event = daemon.status["testEvent"]
+        self.assertIsNone(event["zone"])
+        self.assertEqual(event["rawZone"], "TR")
+        self.assertEqual(event["reason"], "out-of-distribution")
+        self.assertTrue(event["feedbackAvailable"])
+        self.assertFalse(event["accepted"])
 
     def test_failed_live_test_capture_rearms_instead_of_stopping(self):
         classifier = Mock()

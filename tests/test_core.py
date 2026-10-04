@@ -236,11 +236,22 @@ class CoreTests(unittest.TestCase):
             "unavailable",
         )
         preferred = trigger_decision(
-            "preferred", False, 0, 0.2, transient
+            "preferred", True, 0, 0.2, transient
         )
         self.assertEqual(
             (preferred.triggered, preferred.source, preferred.degraded),
-            (True, "microphone", True),
+            (True, "microphone", False),
+        )
+        preferred_fallback = trigger_decision(
+            "preferred", True, 0.3, 0.2, {"audio_ok": False}
+        )
+        self.assertEqual(
+            (
+                preferred_fallback.triggered,
+                preferred_fallback.source,
+                preferred_fallback.degraded,
+            ),
+            (True, "accelerometer", True),
         )
         self.assertFalse(microphone_transient_gate(quiet))
 
@@ -268,6 +279,30 @@ class CoreTests(unittest.TestCase):
                     now,
                 )
             )
+
+    def test_detector_rearms_on_stable_loud_baseline(self):
+        detector = AudioTapDetector()
+        detector.reset(require_quiet=True)
+        now = 0.0
+        ambient = {
+            "audio_ok": True,
+            "rms": 0.025,
+            "crest": 3.0,
+            "peak": 0.075,
+        }
+        for _ in range(4):
+            now += 0.02
+            self.assertFalse(detector.process(ambient, 55, now))
+        self.assertTrue(detector.ready)
+
+        tap = {
+            "audio_ok": True,
+            "rms": 0.055,
+            "crest": 4.0,
+            "peak": 0.22,
+        }
+        now += 0.02
+        self.assertTrue(detector.process(tap, 55, now))
 
     def test_one_physical_impact_emits_one_edge_until_release(self):
         detector = AudioTapDetector()

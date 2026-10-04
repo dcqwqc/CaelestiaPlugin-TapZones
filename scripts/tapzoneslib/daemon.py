@@ -57,6 +57,7 @@ class Daemon:
         self.test_last_zone = None
         self.test_tap_count = 0
         self.test_feedback_sample = None
+        self.calibration_samples = []
 
         # One 20 ms pre-roll frame + trigger frame + 3 post frames gives the
         # fingerprint enough propagation/decay information without slowing tap
@@ -143,6 +144,26 @@ class Daemon:
 
     def active_profile_ready(self):
         return self.active_classifier().profile_ready()
+
+    @staticmethod
+    def _trigger_source(policy, audio_available, accel_available):
+        if policy == "required":
+            return (
+                ("accelerometer", False)
+                if accel_available
+                else ("unavailable", True)
+            )
+        if policy == "off":
+            return (
+                ("microphone", False)
+                if audio_available
+                else ("unavailable", True)
+            )
+        if audio_available:
+            return "microphone", False
+        if accel_available:
+            return "accelerometer", True
+        return "unavailable", True
 
     @staticmethod
     def _append_learning_sample(classifier, zone, signature):
@@ -281,6 +302,7 @@ class Daemon:
         self.status["testActive"] = False
         self.status["testEvent"] = None
         self.test_feedback_sample = None
+        self.calibration_samples = []
         self.pending = []
 
     def _advance_enhanced_calibration(self):
@@ -393,11 +415,9 @@ class Daemon:
 
         elif kind == "calibrate":
             zone = command["zone"]
-            self.classifier.samples.pop(zone, None)
-            self.classifier._axis_cache = None
-            save_classifier(self.classifier)
-            self.refresh_profile_status()
-            self._refresh_active_model()
+            # Stage replacement samples in RAM. Keep the working corner until
+            # all requested taps have completed successfully.
+            self.calibration_samples = []
             self.drain_audio()
             self.audio_detector.reset(require_quiet=True)
             self.calibration_armed_at = now + 0.22
@@ -427,6 +447,7 @@ class Daemon:
             self.status["testActive"] = False
             self.status["testEvent"] = None
             self.test_feedback_sample = None
+            self.calibration_samples = []
             self.pending = []
             self.drain_audio()
             self.refresh_profile_status()
@@ -449,6 +470,7 @@ class Daemon:
             self.status["testActive"] = True
             self.status["testEvent"] = None
             self.test_feedback_sample = None
+            self.calibration_samples = []
             self.status["calibration"] = None
             self.pending = []
 
@@ -613,16 +635,21 @@ class Daemon:
             calibration = self.status.get("calibration")
             if not calibration or calibration.get("complete"):
                 return
-            self.classifier.add(calibration["zone"], legacy_signature)
+            self.calibration_samples.append(legacy_signature.tolist())
             calibration["have"] += 1
-            self.refresh_profile_status()
-            save_classifier(self.classifier)
             if calibration["have"] >= calibration["need"]:
+                zone = calibration["zone"]
+                self.classifier.samples[zone] = list(self.calibration_samples)
+                self.classifier._axis_cache = None
+                self.refresh_profile_status()
+                save_classifier(self.classifier)
+                self._refresh_active_model()
                 self.status["calibration"] = {
                     **calibration,
                     "complete": True,
                     "armed": False,
                 }
+                self.calibration_samples = []
             return
 
         if mode == "test":
@@ -634,6 +661,11 @@ class Daemon:
             classifier = self.enhanced_classifier if use_enhanced else self.classifier
             signature = enhanced_signature if use_enhanced else legacy_signature
             zone, confidence = classifier.classify(signature, 0.0)
+            raw_zone = zone
+            # Very low-confidence impulses are still surfaced for optional
+            # human labelling, but do not pretend to be a known corner.
+            if confidence < 0.05:
+                zone = None
             limit = float(cfg.get("confidence", 72)) / 100
             profile_for_test = (
                 self.status.get("enhancedProfile", {})
@@ -676,6 +708,7 @@ class Daemon:
             self.status["testEvent"] = {
                 "serial": self.test_serial,
                 "zone": zone,
+                "rawZone": raw_zone,
                 "confidence": round(confidence, 3),
                 "accepted": bool(zone and confidence >= limit),
                 "threshold": round(limit, 3),
@@ -685,7 +718,15 @@ class Daemon:
                 "degraded": degraded,
                 "trainedZones": trained,
                 "profileReady": classifier.profile_ready(),
-                "reason": None if zone else "no-trained-zones",
+                "reason": (
+                    None
+                    if zone
+                    else (
+                        "out-of-distribution"
+                        if raw_zone is not None
+                        else "no-trained-zones"
+                    )
+                ),
                 "rms": round(float(capture["audioRms"]), 4),
                 "fingerprintVersion": 3 if use_enhanced else 2,
                 "model": self.status.get("activeModel"),
@@ -768,18 +809,12 @@ class Daemon:
             100 - int(cfg.get("sensitivity", 55))
         ) * 0.004
 
-        if policy == "off":
-            source = "microphone"
-            degraded = False
-        elif accel is not None:
-            source = "accelerometer"
-            degraded = False
-        elif policy == "preferred":
-            source = "microphone"
-            degraded = True
-        else:
-            source = "unavailable"
-            degraded = True
+        audio_available = self.status.get("audio") == "capturing-default-source"
+        source, degraded = self._trigger_source(
+            policy,
+            audio_available,
+            accel is not None,
+        )
 
         if source == "microphone":
             detector_ready_before = self.audio_detector.ready
