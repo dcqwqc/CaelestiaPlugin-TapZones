@@ -12,7 +12,7 @@ def inactive_status():
 
 
 def main():
- p=argparse.ArgumentParser();s=p.add_subparsers(dest="cmd",required=True);s.add_parser("daemon");s.add_parser("status");c=s.add_parser("calibrate");c.add_argument("zone",choices=ZONES);c.add_argument("--count",type=int,default=DEFAULT_CALIBRATION_SAMPLES);s.add_parser("reset");s.add_parser("calibrate-enhanced");s.add_parser("reset-enhanced");a=s.add_parser("action-test");a.add_argument("action");a.add_argument("--custom-json",default="[]");s.add_parser("test-start");s.add_parser("test-stop");s.add_parser("accel-discover");args=p.parse_args()
+ p=argparse.ArgumentParser();s=p.add_subparsers(dest="cmd",required=True);s.add_parser("daemon");s.add_parser("status");c=s.add_parser("calibrate");c.add_argument("zone",choices=ZONES);c.add_argument("--count",type=int,default=DEFAULT_CALIBRATION_SAMPLES);s.add_parser("reset");s.add_parser("calibrate-enhanced");s.add_parser("reset-enhanced");a=s.add_parser("action-test");a.add_argument("action");a.add_argument("--custom-json",default="[]");s.add_parser("test-start");s.add_parser("test-stop");f=s.add_parser("test-feedback");f.add_argument("zone",choices=ZONES);f.add_argument("--serial",type=int,required=True);s.add_parser("accel-discover");args=p.parse_args()
  if args.cmd=="daemon":run();return 0
  if args.cmd=="status":
   status=inactive_status();status.update(read_json(xdg("runtime","status.json"),{}));print(json.dumps(status));return 0
@@ -21,4 +21,4 @@ def main():
   try:custom=json.loads(args.custom_json)
   except json.JSONDecodeError:custom=[]
   print(json.dumps(run_action(args.action,True,custom)));return 0
- cmd={"type":args.cmd,"zone":getattr(args,"zone",None),"count":getattr(args,"count",None)};atomic_json(xdg("runtime","command.json"),cmd);return 0
+ cmd={"type":args.cmd,"zone":getattr(args,"zone",None),"count":getattr(args,"count",None),"serial":getattr(args,"serial",None)};atomic_json(xdg("runtime","command.json"),cmd);return 0

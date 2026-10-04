@@ -8,6 +8,7 @@ from collections import deque
 import numpy as np
 
 from .core import (
+    ACTIVE_LEARNING_MAX_SAMPLES,
     AudioTapDetector,
     CLASSIFIER_MIN_SAMPLES,
     DEFAULT_CALIBRATION_SAMPLES,
@@ -55,6 +56,7 @@ class Daemon:
         self.test_last_tap_at = 0.0
         self.test_last_zone = None
         self.test_tap_count = 0
+        self.test_feedback_sample = None
 
         # One 20 ms pre-roll frame + trigger frame + 3 post frames gives the
         # fingerprint enough propagation/decay information without slowing tap
@@ -97,17 +99,28 @@ class Daemon:
     def publish(self):
         atomic_json(xdg("runtime", "status.json"), self.status)
 
+    @staticmethod
+    def _sync_cached_axis_validation(classifier, quality):
+        cache = getattr(classifier, "_axis_cache", None)
+        if cache is not None and quality:
+            cache["lrValidation"] = float(quality.get("lrAccuracy", 0.0))
+            cache["tbValidation"] = float(quality.get("tbAccuracy", 0.0))
+
     def refresh_profile_status(self, recompute_quality=True):
         self.status["profile"] = self.classifier.profile()
         self.status["profileReady"] = self.classifier.profile_ready()
         if recompute_quality:
-            self.status["calibrationQuality"] = self.classifier.validation_accuracy()
+            quality = self.classifier.validation_accuracy()
+            self._sync_cached_axis_validation(self.classifier, quality)
+            self.status["calibrationQuality"] = quality
             self.status["axisModel"] = self.classifier.axis_model_info()
 
     def refresh_enhanced_status(self):
         self.status["enhancedProfile"] = self.enhanced_classifier.profile()
         self.status["enhancedProfileReady"] = self.enhanced_classifier.profile_ready()
-        self.status["enhancedQuality"] = self.enhanced_classifier.validation_accuracy()
+        quality = self.enhanced_classifier.validation_accuracy()
+        self._sync_cached_axis_validation(self.enhanced_classifier, quality)
+        self.status["enhancedQuality"] = quality
         self.status["enhancedAxisModel"] = self.enhanced_classifier.axis_model_info()
         self._refresh_active_model()
 
@@ -130,6 +143,84 @@ class Daemon:
 
     def active_profile_ready(self):
         return self.active_classifier().profile_ready()
+
+    @staticmethod
+    def _append_learning_sample(classifier, zone, signature):
+        # Keep the feature subset selected from guided calibration stable while
+        # live feedback grows the nearest-neighbour dataset. Re-running the
+        # exhaustive feature search after every label scales badly; the new
+        # sample still affects classification immediately through the rows.
+        cached_model = getattr(classifier, "_axis_cache", None)
+        classifier.add(zone, signature)
+        raw = classifier.samples.get(zone, [])
+        if len(raw) > ACTIVE_LEARNING_MAX_SAMPLES:
+            classifier.samples[zone] = raw[-ACTIVE_LEARNING_MAX_SAMPLES:]
+        if cached_model is not None:
+            classifier._axis_cache = cached_model
+
+    def _apply_test_feedback(self, zone, serial):
+        try:
+            serial = int(serial)
+        except (TypeError, ValueError):
+            serial = -1
+
+        event = self.status.get("testEvent")
+        sample = getattr(self, "test_feedback_sample", None)
+        if (
+            zone not in ("TL", "TR", "BL", "BR")
+            or not event
+            or not sample
+            or int(event.get("serial", -1)) != int(serial)
+            or int(sample.get("serial", -1)) != int(serial)
+            or event.get("feedbackApplied")
+        ):
+            self.status["lastTestFeedback"] = {
+                "ok": False,
+                "serial": serial,
+                "zone": zone,
+                "reason": "stale-or-missing-test-sample",
+            }
+            return False
+
+        predicted = event.get("zone")
+        self._append_learning_sample(self.classifier, zone, sample["legacy"])
+        self.refresh_profile_status()
+        save_classifier(self.classifier)
+
+        learned_v3 = False
+        enhanced = sample.get("enhanced")
+        if enhanced is not None:
+            self._append_learning_sample(self.enhanced_classifier, zone, enhanced)
+            self.refresh_enhanced_status()
+            save_enhanced_classifier(self.enhanced_classifier)
+            learned_v3 = True
+        else:
+            self._refresh_active_model()
+
+        event["feedbackApplied"] = True
+        event["feedbackAvailable"] = False
+        event["correctedZone"] = zone
+        event["predictionWasCorrect"] = predicted == zone
+        event["learnedV2"] = True
+        event["learnedV3"] = learned_v3
+        event["learnedCounts"] = {
+            "v2": len(self.classifier.samples.get(zone, [])),
+            "v3": (
+                len(self.enhanced_classifier.samples.get(zone, []))
+                if learned_v3 else 0
+            ),
+        }
+        self.status["lastTestFeedback"] = {
+            "ok": True,
+            "serial": serial,
+            "predictedZone": predicted,
+            "correctedZone": zone,
+            "learnedV2": True,
+            "learnedV3": learned_v3,
+        }
+        self.test_feedback_sample = None
+        self.publish()
+        return True
 
     @staticmethod
     def _enhanced_sequence(rounds=ENHANCED_MAX_SAMPLES):
@@ -189,6 +280,7 @@ class Daemon:
         }
         self.status["testActive"] = False
         self.status["testEvent"] = None
+        self.test_feedback_sample = None
         self.pending = []
 
     def _advance_enhanced_calibration(self):
@@ -312,6 +404,7 @@ class Daemon:
             self.pending = []
             self.status["testActive"] = False
             self.status["testEvent"] = None
+            self.test_feedback_sample = None
             requested = int(
                 command.get("count", DEFAULT_CALIBRATION_SAMPLES)
                 or DEFAULT_CALIBRATION_SAMPLES
@@ -333,6 +426,7 @@ class Daemon:
             self.status["calibration"] = None
             self.status["testActive"] = False
             self.status["testEvent"] = None
+            self.test_feedback_sample = None
             self.pending = []
             self.drain_audio()
             self.refresh_profile_status()
@@ -354,8 +448,15 @@ class Daemon:
             self.test_tap_count = 0
             self.status["testActive"] = True
             self.status["testEvent"] = None
+            self.test_feedback_sample = None
             self.status["calibration"] = None
             self.pending = []
+
+        elif kind == "test-feedback":
+            self._apply_test_feedback(
+                command.get("zone"),
+                command.get("serial", -1),
+            )
 
         elif kind == "test-stop":
             self.status["testActive"] = False
@@ -449,7 +550,7 @@ class Daemon:
         pcm = np.concatenate(capture["frames"], axis=0)
         legacy_signature = location_signature(pcm)
         need_enhanced = (
-            capture["mode"] == "enhanced-calibration"
+            capture["mode"] in ("enhanced-calibration", "test")
             or self.status.get("activeModel") == "v3-dispersion"
         )
         enhanced_signature = (
@@ -457,6 +558,7 @@ class Daemon:
         )
         if legacy_signature is None:
             if capture["mode"] == "test":
+                self.test_feedback_sample = None
                 self.status["testEvent"] = {
                     "serial": getattr(self, "test_serial", 0),
                     "zone": None,
@@ -513,8 +615,8 @@ class Daemon:
                 return
             self.classifier.add(calibration["zone"], legacy_signature)
             calibration["have"] += 1
-            save_classifier(self.classifier)
             self.refresh_profile_status()
+            save_classifier(self.classifier)
             if calibration["have"] >= calibration["need"]:
                 self.status["calibration"] = {
                     **calibration,
@@ -556,6 +658,21 @@ class Daemon:
             self.test_last_zone = zone
             self.test_last_tap_at = now if zone else 0.0
 
+            enhanced_for_learning = enhanced_signature
+            if enhanced_for_learning is not None:
+                quality = capture_quality(pcm)
+                if not quality.get("ok"):
+                    enhanced_for_learning = None
+
+            self.test_feedback_sample = {
+                "serial": self.test_serial,
+                "legacy": legacy_signature.copy(),
+                "enhanced": (
+                    enhanced_for_learning.copy()
+                    if enhanced_for_learning is not None else None
+                ),
+            }
+
             self.status["testEvent"] = {
                 "serial": self.test_serial,
                 "zone": zone,
@@ -572,6 +689,10 @@ class Daemon:
                 "rms": round(float(capture["audioRms"]), 4),
                 "fingerprintVersion": 3 if use_enhanced else 2,
                 "model": self.status.get("activeModel"),
+                "feedbackAvailable": True,
+                "feedbackApplied": False,
+                "correctedZone": None,
+                "trainingV3Available": enhanced_for_learning is not None,
             }
             # Continuous playground: keep listening after every result.
             # The result stays on screen while the detector waits for two

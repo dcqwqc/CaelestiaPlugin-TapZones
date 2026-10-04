@@ -11,6 +11,7 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, os.path.join(ROOT, "scripts"))
 
 from tapzoneslib.daemon import Daemon
+from tapzoneslib.core import ACTIVE_LEARNING_MAX_SAMPLES, Classifier, EnhancedClassifier
 
 
 class DaemonV2Tests(unittest.TestCase):
@@ -60,6 +61,7 @@ class DaemonV2Tests(unittest.TestCase):
         daemon.test_last_tap_at = 0.0
         daemon.test_last_zone = None
         daemon.test_tap_count = 0
+        daemon.test_feedback_sample = None
         daemon.audio_detector = Mock()
         daemon.fingerprint_capture = {
             "mode": mode,
@@ -210,7 +212,7 @@ class DaemonV2Tests(unittest.TestCase):
         self.assertEqual(daemon.status["testEvent"]["zone"], "TR")
         self.assertEqual(daemon.status["testEvent"]["serial"], 3)
 
-    def test_v2_live_test_skips_inactive_v3_fingerprint(self):
+    def test_v2_live_test_captures_v3_fingerprint_for_feedback(self):
         classifier = Mock()
         classifier.profile.return_value = {
             zone: {"count": 6} for zone in ("TL", "TR", "BL", "BR")
@@ -227,20 +229,31 @@ class DaemonV2Tests(unittest.TestCase):
                 for zone in ("TL", "TR", "BL", "BR")
             },
         })
+        enhanced_signature = np.linspace(-1, 1, 58)
 
         with patch(
             "tapzoneslib.daemon.location_signature",
             return_value=np.ones(30),
         ), patch(
             "tapzoneslib.daemon.enhanced_location_signature",
-        ) as enhanced:
+            return_value=enhanced_signature,
+        ) as enhanced, patch(
+            "tapzoneslib.daemon.capture_quality",
+            return_value={"ok": True},
+        ):
             daemon._finish_fingerprint_capture({
                 "confidence": 72,
                 "multiTapWindowMs": 420,
             })
 
-        enhanced.assert_not_called()
+        enhanced.assert_called_once()
         self.assertEqual(daemon.status["testEvent"]["zone"], "TL")
+        self.assertTrue(daemon.status["testEvent"]["feedbackAvailable"])
+        self.assertTrue(daemon.status["testEvent"]["trainingV3Available"])
+        np.testing.assert_allclose(
+            daemon.test_feedback_sample["enhanced"],
+            enhanced_signature,
+        )
 
     def test_failed_live_test_capture_rearms_instead_of_stopping(self):
         classifier = Mock()
@@ -264,6 +277,133 @@ class DaemonV2Tests(unittest.TestCase):
         )
         daemon.audio_detector.reset.assert_called_once_with(
             require_quiet=True
+        )
+
+    def _learning_classifier(self, width, count):
+        zones = ("TL", "TR", "BL", "BR")
+        samples = {}
+        for zi, zone in enumerate(zones):
+            rows = []
+            for i in range(count):
+                row = np.zeros(width, dtype=float)
+                row[0] = zi * 2.0 + i * 0.01
+                row[1] = zi * 0.25
+                if width > 30:
+                    row[30] = zi * 0.15 + i * 0.002
+                rows.append(row.tolist())
+            samples[zone] = rows
+        return samples
+
+    def test_live_feedback_relabels_and_trains_v2_and_v3(self):
+        daemon = Daemon.__new__(Daemon)
+        daemon.classifier = Classifier(self._learning_classifier(30, 6))
+        daemon.enhanced_classifier = EnhancedClassifier(
+            self._learning_classifier(58, 8)
+        )
+        daemon.status = {
+            "testEvent": {
+                "serial": 7,
+                "zone": "TR",
+                "feedbackAvailable": True,
+                "feedbackApplied": False,
+            },
+            "profile": daemon.classifier.profile(),
+            "profileReady": True,
+            "calibrationQuality": daemon.classifier.validation_accuracy(),
+            "axisModel": daemon.classifier.axis_model_info(),
+            "enhancedProfile": daemon.enhanced_classifier.profile(),
+            "enhancedProfileReady": True,
+            "enhancedQuality": daemon.enhanced_classifier.validation_accuracy(),
+            "enhancedAxisModel": daemon.enhanced_classifier.axis_model_info(),
+            "activeModel": "v2-axis",
+            "fingerprintVersion": 2,
+        }
+        legacy = np.linspace(-0.4, 0.4, 30)
+        enhanced = np.linspace(-0.8, 0.8, 58)
+        daemon.test_feedback_sample = {
+            "serial": 7,
+            "legacy": legacy,
+            "enhanced": enhanced,
+        }
+        daemon.publish = Mock()
+
+        before_v2 = len(daemon.classifier.samples["BL"])
+        before_v3 = len(daemon.enhanced_classifier.samples["BL"])
+        with patch("tapzoneslib.daemon.save_classifier"), patch(
+            "tapzoneslib.daemon.save_enhanced_classifier"
+        ):
+            self.assertTrue(daemon._apply_test_feedback("BL", 7))
+
+        self.assertEqual(
+            len(daemon.classifier.samples["BL"]),
+            before_v2 + 1,
+        )
+        self.assertEqual(
+            len(daemon.enhanced_classifier.samples["BL"]),
+            before_v3 + 1,
+        )
+        event = daemon.status["testEvent"]
+        self.assertTrue(event["feedbackApplied"])
+        self.assertFalse(event["feedbackAvailable"])
+        self.assertEqual(event["correctedZone"], "BL")
+        self.assertFalse(event["predictionWasCorrect"])
+        self.assertTrue(event["learnedV2"])
+        self.assertTrue(event["learnedV3"])
+        np.testing.assert_allclose(
+            daemon.classifier.samples["BL"][-1],
+            legacy,
+        )
+        np.testing.assert_allclose(
+            daemon.enhanced_classifier.samples["BL"][-1],
+            enhanced,
+        )
+        daemon.publish.assert_called_once()
+
+    def test_live_feedback_rejects_stale_serial(self):
+        daemon = Daemon.__new__(Daemon)
+        daemon.classifier = Classifier(self._learning_classifier(30, 6))
+        daemon.enhanced_classifier = EnhancedClassifier(
+            self._learning_classifier(58, 8)
+        )
+        daemon.status = {
+            "testEvent": {
+                "serial": 9,
+                "zone": "TL",
+                "feedbackAvailable": True,
+                "feedbackApplied": False,
+            },
+        }
+        daemon.test_feedback_sample = {
+            "serial": 9,
+            "legacy": np.zeros(30),
+            "enhanced": np.zeros(58),
+        }
+        before = len(daemon.classifier.samples["BR"])
+        self.assertFalse(daemon._apply_test_feedback("BR", 8))
+        self.assertEqual(len(daemon.classifier.samples["BR"]), before)
+        self.assertEqual(
+            daemon.status["lastTestFeedback"]["reason"],
+            "stale-or-missing-test-sample",
+        )
+
+    def test_live_feedback_rolls_training_window(self):
+        daemon = Daemon.__new__(Daemon)
+        classifier = Classifier({
+            "TL": [
+                (np.ones(30) * i).tolist()
+                for i in range(ACTIVE_LEARNING_MAX_SAMPLES)
+            ]
+        })
+        newest = np.ones(30) * 999
+        Daemon._append_learning_sample(classifier, "TL", newest)
+
+        self.assertEqual(
+            len(classifier.samples["TL"]),
+            ACTIVE_LEARNING_MAX_SAMPLES,
+        )
+        np.testing.assert_allclose(classifier.samples["TL"][-1], newest)
+        self.assertFalse(
+            np.allclose(classifier.samples["TL"][0], np.zeros(30))
         )
 
     def test_enhanced_calibration_stores_only_good_v3_sample(self):

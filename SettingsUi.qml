@@ -148,6 +148,15 @@ ColumnLayout {
         refreshTimer.restart();
     }
 
+    function teachTest(zone): void {
+        const event = status.testEvent;
+        if (!event || event.feedbackApplied || !event.feedbackAvailable)
+            return;
+        tester.command = [helper, "test-feedback", zone, "--serial", String(event.serial)];
+        tester.running = true;
+        refreshTimer.restart();
+    }
+
     function readinessText(): string {
         const active = String(status.activeModel ?? "v2-axis");
         const quality = active === "v3-dispersion" ? status.enhancedQuality : status.calibrationQuality;
@@ -455,17 +464,22 @@ ColumnLayout {
                     model: root.zones
 
                     StyledRect {
+                        id: zoneCard
+
                         required property string modelData
 
-                        readonly property bool selected: root.status.testEvent?.zone === modelData
+                        readonly property bool predicted: root.status.testEvent?.zone === modelData
+                        readonly property bool learned: root.status.testEvent?.feedbackApplied && root.status.testEvent?.correctedZone === modelData
+                        readonly property bool selected: root.status.testEvent?.feedbackApplied ? learned : predicted
+                        readonly property bool canTeach: Boolean(root.status.testEvent?.feedbackAvailable) && !root.status.testEvent?.feedbackApplied
 
                         Layout.fillWidth: true
                         Layout.preferredWidth: 1
                         implicitHeight: 62
                         radius: Tokens.rounding.large
                         color: selected ? Colours.palette.m3success : Colours.tPalette.m3surfaceContainerHighest
-                        border.width: selected ? 3 : 0
-                        border.color: selected ? Colours.palette.m3onSuccess : "transparent"
+                        border.width: selected ? 3 : (canTeach ? 1 : 0)
+                        border.color: selected ? Colours.palette.m3onSuccess : Colours.palette.m3outlineVariant
 
                         RowLayout {
                             anchors.fill: parent
@@ -490,19 +504,55 @@ ColumnLayout {
                                 }
 
                                 StyledText {
-                                    visible: parent.parent.parent.selected
+                                    visible: parent.parent.parent.selected || (root.status.testEvent?.feedbackApplied && parent.parent.parent.predicted)
                                     text: {
+                                        if (root.status.testEvent?.feedbackApplied) {
+                                            if (parent.parent.parent.learned)
+                                                return qsTr("LEARNED");
+                                            if (parent.parent.parent.predicted)
+                                                return qsTr("was prediction");
+                                        }
                                         const taps = Math.max(1, Number(root.status.testEvent?.tapCount ?? 1));
                                         const tapLabel = taps === 1 ? "1×" : (taps === 2 ? "2× · DOUBLE" : "3× · TRIPLE");
                                         return qsTr("%1 · %2%").arg(tapLabel).arg(Math.round(Number(root.status.testEvent?.confidence ?? 0) * 100));
                                     }
-                                    color: Colours.palette.m3onSuccess
+                                    color: parent.parent.parent.selected ? Colours.palette.m3onSuccess : Colours.palette.m3outline
                                     font: Tokens.font.label.small
                                 }
                             }
                         }
+
+                        TapHandler {
+                            enabled: zoneCard.canTeach
+                            onTapped: root.teachTest(zoneCard.modelData)
+                        }
                     }
                 }
+            }
+
+            StyledText {
+                Layout.fillWidth: true
+                visible: Boolean(root.status.testEvent?.feedbackAvailable) && !root.status.testEvent?.feedbackApplied
+                text: qsTr("Wrong? Tap the corner card it actually was. Tap the highlighted card if the prediction was correct — either way, this fingerprint becomes new training data.")
+                wrapMode: Text.WordWrap
+                color: Colours.palette.m3primary
+                font: Tokens.font.label.small
+            }
+
+            StyledText {
+                Layout.fillWidth: true
+                visible: Boolean(root.status.testEvent?.feedbackApplied)
+                text: {
+                    const event = root.status.testEvent;
+                    const learned = root.zoneName(event?.correctedZone);
+                    const v2 = Number(event?.learnedCounts?.v2 ?? 0);
+                    const v3 = Number(event?.learnedCounts?.v3 ?? 0);
+                    const result = event?.predictionWasCorrect ? qsTr("Confirmed %1 and learned it.").arg(learned) : qsTr("Corrected to %1 and learned from the mistake.").arg(learned);
+                    return event?.learnedV3 ? `${result} ${qsTr("That corner now has %1 v2 + %2 v3 live-learning samples.").arg(v2).arg(v3)}` : `${result} ${qsTr("That corner now has %1 v2 samples.").arg(v2)}`;
+                }
+                wrapMode: Text.WordWrap
+                color: Colours.palette.m3success
+                font: Tokens.font.label.small
             }
 
             StyledText {

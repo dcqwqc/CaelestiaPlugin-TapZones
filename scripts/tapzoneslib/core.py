@@ -10,6 +10,7 @@ CLASSIFIER_MIN_SAMPLES = 5
 ENHANCED_MIN_SAMPLES = 8
 ENHANCED_TARGET_SAMPLES = 8
 ENHANCED_MAX_SAMPLES = 12
+ACTIVE_LEARNING_MAX_SAMPLES = 32
 DEFAULT_CALIBRATION_SAMPLES = 6
 LOCATION_SIGNATURE_SIZE = 30
 ENHANCED_SIGNATURE_SIZE = 58
@@ -745,20 +746,43 @@ class EnhancedClassifier(Classifier):
         return distance > 5.5
 
 
+def _restore_axis_cache(classifier, data):
+    model = data.get("axisModel")
+    if (
+        isinstance(model, dict)
+        and isinstance(model.get("lrFeatures"), list)
+        and isinstance(model.get("tbFeatures"), list)
+    ):
+        classifier._axis_cache = model
+    return classifier
+
+
+def _profile_payload(classifier, version):
+    payload = {
+        "version": version,
+        "samples": classifier.samples,
+        "profile": classifier.profile(),
+    }
+    model = getattr(classifier, "_axis_cache", None)
+    if isinstance(model, dict):
+        payload["axisModel"] = model
+    return payload
+
+
 def load_enhanced_classifier():
     data = read_json(xdg("state","profile-v3.json"), {})
     if data.get("version") != ENHANCED_PROFILE_VERSION:
         return EnhancedClassifier({})
     samples = data.get("samples", {})
-    return EnhancedClassifier(samples if isinstance(samples, dict) else {})
+    classifier = EnhancedClassifier(samples if isinstance(samples, dict) else {})
+    return _restore_axis_cache(classifier, data)
 
 
 def save_enhanced_classifier(c):
-    atomic_json(xdg("state","profile-v3.json"), {
-        "version": ENHANCED_PROFILE_VERSION,
-        "samples": c.samples,
-        "profile": c.profile(),
-    })
+    atomic_json(
+        xdg("state","profile-v3.json"),
+        _profile_payload(c, ENHANCED_PROFILE_VERSION),
+    )
 
 
 
@@ -767,15 +791,15 @@ def load_classifier():
     if data.get("version") != PROFILE_VERSION:
         return Classifier({})
     samples = data.get("samples", {})
-    return Classifier(samples if isinstance(samples, dict) else {})
+    classifier = Classifier(samples if isinstance(samples, dict) else {})
+    return _restore_axis_cache(classifier, data)
 
 
 def save_classifier(c):
-    atomic_json(xdg("state","profile.json"), {
-        "version": PROFILE_VERSION,
-        "samples": c.samples,
-        "profile": c.profile(),
-    })
+    atomic_json(
+        xdg("state","profile.json"),
+        _profile_payload(c, PROFILE_VERSION),
+    )
 
 
 def action_argv(action,custom=None):
