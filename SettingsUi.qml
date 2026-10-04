@@ -8,6 +8,7 @@ import Caelestia.Config
 import qs.components
 import qs.components.controls
 import qs.modules.nexus.common
+import qs.services
 import dcqwqc.tapzones
 
 ColumnLayout {
@@ -132,8 +133,7 @@ ColumnLayout {
     }
 
     function refresh(): void {
-        if (!statusProcess.running)
-            statusProcess.running = true;
+        statusFile.reload();
     }
 
     function calibrate(zone): void {
@@ -184,18 +184,20 @@ ColumnLayout {
         return event.accepted ? qsTr("%1 · %2 · %3% confidence · %4 · %5").arg(zoneName(event.zone)).arg(tapText).arg(pct).arg(model).arg(suffix) : qsTr("%1 · %2 · %3% confidence · below action threshold %4% · %5").arg(zoneName(event.zone)).arg(tapText).arg(pct).arg(Math.round(Number(event.threshold ?? 0) * 100)).arg(model);
     }
 
-    Process {
-        id: statusProcess
-        command: [root.helper, "status"]
-        stdout: StdioCollector {
-            onStreamFinished: {
-                try {
-                    root.status = JSON.parse(text);
-                } catch (e) {
-                    root.status = {
-                        running: false
-                    };
-                }
+    FileView {
+        id: statusFile
+
+        path: `${Quickshell.env("XDG_RUNTIME_DIR")}/tapzones/status.json`
+        watchChanges: true
+        printErrors: false
+        onFileChanged: reload()
+        onLoaded: {
+            try {
+                root.status = JSON.parse(text());
+            } catch (e) {
+                root.status = {
+                    running: false
+                };
             }
         }
     }
@@ -209,9 +211,8 @@ ColumnLayout {
 
     Timer {
         id: refreshTimer
-        interval: root.status.testActive ? 50 : ((root.status.calibration && !root.status.calibration.complete) ? 100 : 700)
-        repeat: true
-        running: true
+        interval: 120
+        repeat: false
         onTriggered: root.refresh()
     }
 
