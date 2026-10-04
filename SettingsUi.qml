@@ -177,9 +177,11 @@ ColumnLayout {
         if (!event.zone)
             return qsTr("Tap detected · %1 · no trained zones yet. Calibrate any corner and the next test can start predicting it.").arg(source);
         const pct = Math.round(Number(event.confidence ?? 0) * 100);
+        const taps = Math.max(1, Number(event.tapCount ?? 1));
+        const tapText = taps === 1 ? qsTr("single tap") : (taps === 2 ? qsTr("DOUBLE TAP") : qsTr("TRIPLE TAP"));
         const suffix = event.profileReady ? qsTr("all 4 zones trained") : qsTr("%1/4 zones trained").arg(trained);
         const model = String(event.model ?? "v2-axis");
-        return event.accepted ? qsTr("%1 · %2% confidence · accepted · %3 · %4 · %5").arg(zoneName(event.zone)).arg(pct).arg(source).arg(model).arg(suffix) : qsTr("%1 · %2% confidence · below your %3% threshold · %4 · %5 · %6").arg(zoneName(event.zone)).arg(pct).arg(Math.round(Number(event.threshold ?? 0) * 100)).arg(source).arg(model).arg(suffix);
+        return event.accepted ? qsTr("%1 · %2 · %3% confidence · %4 · %5").arg(zoneName(event.zone)).arg(tapText).arg(pct).arg(model).arg(suffix) : qsTr("%1 · %2 · %3% confidence · below action threshold %4% · %5").arg(zoneName(event.zone)).arg(tapText).arg(pct).arg(Math.round(Number(event.threshold ?? 0) * 100)).arg(model);
     }
 
     Process {
@@ -207,7 +209,7 @@ ColumnLayout {
 
     Timer {
         id: refreshTimer
-        interval: (root.status.testActive || (root.status.calibration && !root.status.calibration.complete)) ? 100 : 700
+        interval: root.status.testActive ? 50 : ((root.status.calibration && !root.status.calibration.complete) ? 100 : 700)
         repeat: true
         running: true
         onTriggered: root.refresh()
@@ -460,9 +462,9 @@ ColumnLayout {
                         Layout.preferredWidth: 1
                         implicitHeight: 62
                         radius: Tokens.rounding.large
-                        color: selected ? Colours.palette.m3successContainer : Colours.tPalette.m3surfaceContainerHighest
-                        border.width: selected ? 2 : 0
-                        border.color: selected ? Colours.palette.m3success : "transparent"
+                        color: selected ? Colours.palette.m3success : Colours.tPalette.m3surfaceContainerHighest
+                        border.width: selected ? 3 : 0
+                        border.color: selected ? Colours.palette.m3onSuccess : "transparent"
 
                         RowLayout {
                             anchors.fill: parent
@@ -471,7 +473,7 @@ ColumnLayout {
 
                             MaterialIcon {
                                 text: root.zoneIcon(parent.parent.modelData)
-                                color: parent.parent.selected ? Colours.palette.m3success : Colours.palette.m3onSurfaceVariant
+                                color: parent.parent.selected ? Colours.palette.m3onSuccess : Colours.palette.m3onSurfaceVariant
                                 fontStyle: Tokens.font.icon.medium
                                 fill: parent.parent.selected ? 1 : 0
                             }
@@ -482,14 +484,18 @@ ColumnLayout {
 
                                 StyledText {
                                     text: root.zoneName(parent.parent.parent.modelData)
-                                    color: parent.parent.parent.selected ? Colours.palette.m3onSuccessContainer : Colours.palette.m3onSurface
+                                    color: parent.parent.parent.selected ? Colours.palette.m3onSuccess : Colours.palette.m3onSurface
                                     font: Tokens.font.body.small
                                 }
 
                                 StyledText {
                                     visible: parent.parent.parent.selected
-                                    text: qsTr("%1%").arg(Math.round(Number(root.status.testEvent?.confidence ?? 0) * 100))
-                                    color: Colours.palette.m3success
+                                    text: {
+                                        const taps = Math.max(1, Number(root.status.testEvent?.tapCount ?? 1));
+                                        const tapLabel = taps === 1 ? "1×" : (taps === 2 ? "2× · DOUBLE" : "3× · TRIPLE");
+                                        return qsTr("%1 · %2%").arg(tapLabel).arg(Math.round(Number(root.status.testEvent?.confidence ?? 0) * 100));
+                                    }
+                                    color: Colours.palette.m3onSuccess
                                     font: Tokens.font.label.small
                                 }
                             }

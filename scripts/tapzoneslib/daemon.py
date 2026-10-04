@@ -52,6 +52,9 @@ class Daemon:
         self.calibration_armed_at = 0.0
         self.test_armed_at = 0.0
         self.test_serial = 0
+        self.test_last_tap_at = 0.0
+        self.test_last_zone = None
+        self.test_tap_count = 0
 
         # One 20 ms pre-roll frame + trigger frame + 3 post frames gives the
         # fingerprint enough propagation/decay information without slowing tap
@@ -346,6 +349,9 @@ class Daemon:
             self.drain_audio()
             self.audio_detector.reset(require_quiet=True)
             self.test_armed_at = now + 0.22
+            self.test_last_tap_at = 0.0
+            self.test_last_zone = None
+            self.test_tap_count = 0
             self.status["testActive"] = True
             self.status["testEvent"] = None
             self.status["calibration"] = None
@@ -353,6 +359,10 @@ class Daemon:
 
         elif kind == "test-stop":
             self.status["testActive"] = False
+            self.status["testArmed"] = False
+            self.test_last_tap_at = 0.0
+            self.test_last_zone = None
+            self.test_tap_count = 0
             self.pending = []
             self.drain_audio()
 
@@ -440,7 +450,7 @@ class Daemon:
         legacy_signature = location_signature(pcm)
         need_enhanced = (
             capture["mode"] == "enhanced-calibration"
-            or self.status.get("enhancedProfileReady")
+            or self.status.get("activeModel") == "v3-dispersion"
         )
         enhanced_signature = (
             enhanced_location_signature(pcm) if need_enhanced else None
@@ -460,6 +470,7 @@ class Daemon:
                 self.status["testArmed"] = False
                 self.audio_detector.reset(require_quiet=True)
                 self.test_armed_at = time.monotonic()
+                self.publish()
             return
 
         mode = capture["mode"]
@@ -532,12 +543,27 @@ class Daemon:
                 for zone_name, profile in profile_for_test.items()
                 if int(profile.get("count", 0)) >= minimum
             ]
+            now = time.monotonic()
+            tap_window = int(cfg.get("multiTapWindowMs", 420)) / 1000
+            if (
+                zone
+                and zone == self.test_last_zone
+                and now - self.test_last_tap_at <= tap_window
+            ):
+                self.test_tap_count = min(3, self.test_tap_count + 1)
+            else:
+                self.test_tap_count = 1 if zone else 0
+            self.test_last_zone = zone
+            self.test_last_tap_at = now if zone else 0.0
+
             self.status["testEvent"] = {
                 "serial": self.test_serial,
                 "zone": zone,
                 "confidence": round(confidence, 3),
                 "accepted": bool(zone and confidence >= limit),
                 "threshold": round(limit, 3),
+                "tapCount": self.test_tap_count,
+                "tapWindowMs": int(cfg.get("multiTapWindowMs", 420)),
                 "triggerSource": source,
                 "degraded": degraded,
                 "trainedZones": trained,
@@ -555,6 +581,9 @@ class Daemon:
             self.pending = []
             self.audio_detector.reset(require_quiet=True)
             self.test_armed_at = time.monotonic()
+            # Do not wait for the periodic status publisher: live-test UI
+            # should see this prediction on its very next 50 ms poll.
+            self.publish()
             return
 
         if mode == "normal":
@@ -688,7 +717,10 @@ class Daemon:
             if frame is not None:
                 self.fingerprint_capture["frames"].append(frame)
                 self.fingerprint_capture["postFrames"] += 1
-                if self.fingerprint_capture["postFrames"] >= 3:
+                required_post_frames = (
+                    2 if self.fingerprint_capture.get("mode") == "test" else 3
+                )
+                if self.fingerprint_capture["postFrames"] >= required_post_frames:
                     self._finish_fingerprint_capture(cfg)
             if frame is not None:
                 self.audio_history.append(frame)
@@ -740,7 +772,7 @@ class Daemon:
             now = time.monotonic()
             if now >= next_publish:
                 self.publish()
-                next_publish = now + 0.1
+                next_publish = now + (0.05 if self.status.get("testActive") else 0.1)
             time.sleep(0.02)
 
 

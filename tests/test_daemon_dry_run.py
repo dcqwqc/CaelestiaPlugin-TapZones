@@ -57,6 +57,9 @@ class DaemonV2Tests(unittest.TestCase):
         daemon.pending = []
         daemon.last_accept = 0.0
         daemon.test_serial = 0
+        daemon.test_last_tap_at = 0.0
+        daemon.test_last_zone = None
+        daemon.test_tap_count = 0
         daemon.audio_detector = Mock()
         daemon.fingerprint_capture = {
             "mode": mode,
@@ -154,6 +157,90 @@ class DaemonV2Tests(unittest.TestCase):
         self.assertFalse(daemon.status["testArmed"])
         self.assertTrue(daemon.status["testEvent"]["accepted"])
         self.assertGreaterEqual(daemon.audio_detector.reset.call_count, 2)
+
+    def test_live_test_groups_double_and_triple_taps_immediately(self):
+        classifier = Mock()
+        classifier.profile.return_value = {
+            zone: {"count": 6} for zone in ("TL", "TR", "BL", "BR")
+        }
+        classifier.profile_ready.return_value = True
+        classifier.classify.side_effect = [
+            ("TR", 0.91),
+            ("TR", 0.89),
+            ("TR", 0.87),
+        ]
+        daemon = self._daemon_for_finish(classifier, "test")
+
+        def capture():
+            return {
+                "mode": "test",
+                "frames": [np.zeros((960, 2), dtype="<i2")] * 5,
+                "source": "microphone",
+                "degraded": True,
+                "impulse": 0.0,
+                "audioRms": 0.03,
+                "postFrames": 2,
+            }
+
+        with patch(
+            "tapzoneslib.daemon.location_signature",
+            return_value=np.ones(30),
+        ):
+            daemon._finish_fingerprint_capture({
+                "confidence": 72,
+                "multiTapWindowMs": 420,
+            })
+            self.assertEqual(daemon.status["testEvent"]["tapCount"], 1)
+
+            daemon.fingerprint_capture = capture()
+            daemon._finish_fingerprint_capture({
+                "confidence": 72,
+                "multiTapWindowMs": 420,
+            })
+            self.assertEqual(daemon.status["testEvent"]["tapCount"], 2)
+
+            daemon.fingerprint_capture = capture()
+            daemon._finish_fingerprint_capture({
+                "confidence": 72,
+                "multiTapWindowMs": 420,
+            })
+            self.assertEqual(daemon.status["testEvent"]["tapCount"], 3)
+
+        self.assertTrue(daemon.status["testActive"])
+        self.assertEqual(daemon.status["testEvent"]["zone"], "TR")
+        self.assertEqual(daemon.status["testEvent"]["serial"], 3)
+
+    def test_v2_live_test_skips_inactive_v3_fingerprint(self):
+        classifier = Mock()
+        classifier.profile.return_value = {
+            zone: {"count": 6} for zone in ("TL", "TR", "BL", "BR")
+        }
+        classifier.profile_ready.return_value = True
+        classifier.classify.return_value = ("TL", 0.82)
+        daemon = self._daemon_for_finish(classifier, "test")
+        daemon.enhanced_classifier = Mock()
+        daemon.status.update({
+            "activeModel": "v2-axis",
+            "enhancedProfileReady": True,
+            "enhancedProfile": {
+                zone: {"count": 10}
+                for zone in ("TL", "TR", "BL", "BR")
+            },
+        })
+
+        with patch(
+            "tapzoneslib.daemon.location_signature",
+            return_value=np.ones(30),
+        ), patch(
+            "tapzoneslib.daemon.enhanced_location_signature",
+        ) as enhanced:
+            daemon._finish_fingerprint_capture({
+                "confidence": 72,
+                "multiTapWindowMs": 420,
+            })
+
+        enhanced.assert_not_called()
+        self.assertEqual(daemon.status["testEvent"]["zone"], "TL")
 
     def test_failed_live_test_capture_rearms_instead_of_stopping(self):
         classifier = Mock()
