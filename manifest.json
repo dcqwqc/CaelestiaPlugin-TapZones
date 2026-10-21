@@ -5,7 +5,13 @@
   "homepage": "https://github.com/dcqwqc/CaelestiaPlugin-TapZones",
   "icon": "touch_app",
   "description": "Private, on-device four-zone laptop tap detection using the accelerometer and microphone features.",
-  "entryPoints": [{ "type": "custom", "source": "Main.qml" }],
+  "entryPoints": [
+    {
+      "type": "custom",
+      "source": "Main.qml"
+    }
+  ],
   "settings": "Settings.qml",
-  "settingsUi": "SettingsUi.qml"
+  "settingsUi": "SettingsUi.qml",
+  "requires": ">=2.1.0"
 }
