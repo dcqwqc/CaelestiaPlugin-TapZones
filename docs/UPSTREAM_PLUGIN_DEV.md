@@ -13,3 +13,7 @@ Upstream target: https://github.com/caelestia-dots/shell/pull/1703 (experimental
 3. Keep a complete previous plugin directory/config backup and an automatic rollback mechanism before any live deployment.
 
 **State:** Native-development version gate added; plugin remains untested and undeployed.
+
+## Production-safe merge profile
+
+The root `manifest.json` retains the deployed Caelestia fork entry points and has **no upstream-only minimum version requirement**. The experimental official API profile is in `manifest.native-dev.json`; it is not used by the current fork loader. Do not replace the root file with the development profile until the upstream host implements all required custom panels and placement hooks.
